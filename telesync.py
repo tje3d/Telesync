@@ -2,7 +2,8 @@ import logging
 import asyncio
 import os
 import sys
-import mimetypes
+import random
+import time
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
@@ -54,6 +55,12 @@ BALE_SEND_VIDEO_URL = BALE_API_URL.format(token=BALE_TOKEN, method="sendVideo")
 BALE_SEND_AUDIO_URL = BALE_API_URL.format(token=BALE_TOKEN, method="sendAudio")
 BALE_SEND_VOICE_URL = BALE_API_URL.format(token=BALE_TOKEN, method="sendVoice")
 
+# Retry configuration
+MAX_RETRY_TIME = 2 * 60 * 60  # 2 hours in seconds
+MAX_RETRY_DELAY = 60  # Max delay between retries in seconds
+INITIAL_RETRY_DELAY = 1  # Initial retry delay in seconds
+RETRY_EXPONENT = 2  # Exponential backoff factor
+
 async def create_session():
     """Interactive session creation"""
     logger.info("Initial setup - generating session string...")
@@ -64,22 +71,65 @@ async def create_session():
         logger.info("Add this to your .env file and restart")
         return session_str
 
+async def send_with_retry(session, url, payload=None, files=None):
+    """Send request with retry mechanism for server errors and network issues"""
+    start_time = time.monotonic()
+    attempt = 0
+    delay = INITIAL_RETRY_DELAY
+    
+    while time.monotonic() - start_time < MAX_RETRY_TIME:
+        attempt += 1
+        try:
+            if files:
+                # Form data request
+                async with session.post(url, data=files) as resp:
+                    if resp.status >= 500:
+                        error = f"Server error ({resp.status})"
+                        raise aiohttp.ClientError(error)
+                    response = await resp.json()
+            else:
+                # JSON payload request
+                async with session.post(url, json=payload) as resp:
+                    if resp.status >= 500:
+                        error = f"Server error ({resp.status})"
+                        raise aiohttp.ClientError(error)
+                    response = await resp.json()
+            
+            return response
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            # Calculate next delay with jitter
+            jitter = random.uniform(0.5, 1.5)
+            actual_delay = min(delay * jitter, MAX_RETRY_DELAY)
+            
+            logger.warning(
+                f"⚠️ Attempt {attempt} failed: {str(e)}. "
+                f"Retrying in {actual_delay:.1f} seconds..."
+            )
+            
+            await asyncio.sleep(actual_delay)
+            delay = min(delay * RETRY_EXPONENT, MAX_RETRY_DELAY)
+        except Exception as e:
+            logger.error(f"❌ Non-retryable error: {str(e)}")
+            return None
+    
+    logger.error(f"🔥 Forwarding failed after {attempt} attempts over {MAX_RETRY_TIME/60:.1f} minutes")
+    return None
+
 async def forward_to_bale(content_type, caption=None, media_path=None, media_group=None):
-    """Forward content to Bale Messenger"""
+    """Forward content to Bale Messenger with robust retry mechanism"""
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as session:
             if content_type == "text":
                 payload = {
                     "chat_id": BALE_CHAT_ID,
                     "text": caption,
                     "parse_mode": "HTML"
                 }
-                async with session.post(BALE_SEND_MESSAGE_URL, json=payload) as resp:
-                    response = await resp.json()
-                    if not response.get("ok"):
-                        logger.error(f"❌ Bale text send failed: {response}")
-                    else:
-                        logger.info("✅ Text forwarded to Bale")
+                response = await send_with_retry(session, BALE_SEND_MESSAGE_URL, payload=payload)
+                if response and response.get("ok"):
+                    logger.info("✅ Text forwarded to Bale")
+                else:
+                    logger.error(f"❌ Bale text send failed: {response}")
             
             elif content_type == "photo":
                 with open(media_path, 'rb') as file:
@@ -90,18 +140,19 @@ async def forward_to_bale(content_type, caption=None, media_path=None, media_gro
                         form_data.add_field('caption', caption)
                         form_data.add_field('parse_mode', 'HTML')
                     
-                    async with session.post(BALE_SEND_PHOTO_URL, data=form_data) as resp:
-                        response = await resp.json()
-                        if not response.get("ok"):
-                            logger.error(f"❌ Bale photo send failed: {response}")
-                        else:
-                            logger.info("✅ Photo forwarded to Bale")
+                    response = await send_with_retry(session, BALE_SEND_PHOTO_URL, files=form_data)
+                    if response and response.get("ok"):
+                        logger.info("✅ Photo forwarded to Bale")
+                    else:
+                        logger.error(f"❌ Bale photo send failed: {response}")
             
             elif content_type == "media_group":
                 media_data = []
+                form_data = aiohttp.FormData()
+                
                 for i, path in enumerate(media_group):
                     with open(path, 'rb') as file:
-                        media_type = "photo"  # Bale currently only supports photos in media groups
+                        media_type = "photo"
                         media_dict = {
                             "type": media_type,
                             "media": f"attach://media_{i}",
@@ -110,20 +161,16 @@ async def forward_to_bale(content_type, caption=None, media_path=None, media_gro
                         if i == 0 and caption:
                             media_dict["caption"] = caption
                         media_data.append(media_dict)
-                
-                form_data = aiohttp.FormData()
-                for i, path in enumerate(media_group):
-                    form_data.add_field(f'media_{i}', open(path, 'rb'), filename=os.path.basename(path))
+                        form_data.add_field(f'media_{i}', file, filename=os.path.basename(path))
                 
                 form_data.add_field('chat_id', BALE_CHAT_ID)
-                form_data.add_field('media', json.dumps(media_data))
+                form_data.add_field('media', str(media_data).replace("'", '"'))
                 
-                async with session.post(BALE_SEND_MEDIA_GROUP_URL, data=form_data) as resp:
-                    response = await resp.json()
-                    if not response.get("ok"):
-                        logger.error(f"❌ Bale media group send failed: {response}")
-                    else:
-                        logger.info("✅ Media group forwarded to Bale")
+                response = await send_with_retry(session, BALE_SEND_MEDIA_GROUP_URL, files=form_data)
+                if response and response.get("ok"):
+                    logger.info("✅ Media group forwarded to Bale")
+                else:
+                    logger.error(f"❌ Bale media group send failed: {response}")
             
             elif content_type == "video":
                 with open(media_path, 'rb') as file:
@@ -134,12 +181,11 @@ async def forward_to_bale(content_type, caption=None, media_path=None, media_gro
                         form_data.add_field('caption', caption)
                         form_data.add_field('parse_mode', 'HTML')
                     
-                    async with session.post(BALE_SEND_VIDEO_URL, data=form_data) as resp:
-                        response = await resp.json()
-                        if not response.get("ok"):
-                            logger.error(f"❌ Bale video send failed: {response}")
-                        else:
-                            logger.info("✅ Video forwarded to Bale")
+                    response = await send_with_retry(session, BALE_SEND_VIDEO_URL, files=form_data)
+                    if response and response.get("ok"):
+                        logger.info("✅ Video forwarded to Bale")
+                    else:
+                        logger.error(f"❌ Bale video send failed: {response}")
             
             elif content_type == "audio":
                 with open(media_path, 'rb') as file:
@@ -150,12 +196,11 @@ async def forward_to_bale(content_type, caption=None, media_path=None, media_gro
                         form_data.add_field('caption', caption)
                         form_data.add_field('parse_mode', 'HTML')
                     
-                    async with session.post(BALE_SEND_AUDIO_URL, data=form_data) as resp:
-                        response = await resp.json()
-                        if not response.get("ok"):
-                            logger.error(f"❌ Bale audio send failed: {response}")
-                        else:
-                            logger.info("✅ Audio forwarded to Bale")
+                    response = await send_with_retry(session, BALE_SEND_AUDIO_URL, files=form_data)
+                    if response and response.get("ok"):
+                        logger.info("✅ Audio forwarded to Bale")
+                    else:
+                        logger.error(f"❌ Bale audio send failed: {response}")
             
             elif content_type == "voice":
                 with open(media_path, 'rb') as file:
@@ -163,12 +208,11 @@ async def forward_to_bale(content_type, caption=None, media_path=None, media_gro
                     form_data.add_field('chat_id', BALE_CHAT_ID)
                     form_data.add_field('voice', file, filename=os.path.basename(media_path))
                     
-                    async with session.post(BALE_SEND_VOICE_URL, data=form_data) as resp:
-                        response = await resp.json()
-                        if not response.get("ok"):
-                            logger.error(f"❌ Bale voice send failed: {response}")
-                        else:
-                            logger.info("✅ Voice forwarded to Bale")
+                    response = await send_with_retry(session, BALE_SEND_VOICE_URL, files=form_data)
+                    if response and response.get("ok"):
+                        logger.info("✅ Voice forwarded to Bale")
+                    else:
+                        logger.error(f"❌ Bale voice send failed: {response}")
     
     except Exception as e:
         logger.error(f"❌ Bale forwarding error: {str(e)}")
@@ -195,7 +239,6 @@ async def process_message(event):
                 if isinstance(msg.media, MessageMediaPhoto):
                     # Check if part of media group
                     if msg.grouped_id:
-                        # Skip processing here - will handle in album handler
                         logger.info("⏭️ Part of media group - will process as album")
                         return
                     
@@ -302,6 +345,7 @@ async def main():
     
     # Log Bale configuration
     logger.info(f"🤖 Bale forwarding configured to chat: {BALE_CHAT_ID}")
+    logger.info(f"🔄 Retry configured: 2 hours max, {MAX_RETRY_DELAY}s max delay")
     
     await client.run_until_disconnected()
 
