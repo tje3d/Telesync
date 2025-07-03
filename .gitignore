@@ -1,0 +1,19 @@
+# .gitignore for Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Media folder
+media/
+
+# System files
+.DS_Store
