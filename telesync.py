@@ -4,6 +4,7 @@ import os
 import sys
 import random
 import time
+import mimetypes
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
@@ -129,36 +130,75 @@ async def forward_to_bale(content_type, caption=None, media_path=None, media_gro
                     logger.error(f"❌ Bale text send failed: {response}")
             
             elif content_type == "photo":
-                with open(media_path, 'rb') as file:
-                    form_data = aiohttp.FormData()
-                    form_data.add_field('chat_id', BALE_CHAT_ID)
-                    form_data.add_field('photo', file, filename=os.path.basename(media_path))
-                    if caption:
-                        form_data.add_field('caption', caption)
-                        form_data.add_field('parse_mode', 'HTML')
-                    
-                    response = await send_with_retry(session, BALE_SEND_PHOTO_URL, files=form_data)
-                    if response and response.get("ok"):
-                        logger.info("✅ Photo forwarded to Bale")
-                    else:
-                        logger.error(f"❌ Bale photo send failed: {response}")
+                # Use file path instead of file handle
+                form_data = aiohttp.FormData()
+                form_data.add_field('chat_id', BALE_CHAT_ID)
+                form_data.add_field('photo', open(media_path, 'rb'), filename=os.path.basename(media_path))
+                if caption:
+                    form_data.add_field('caption', caption)
+                    form_data.add_field('parse_mode', 'HTML')
+                
+                response = await send_with_retry(session, BALE_SEND_PHOTO_URL, files=form_data)
+                if response and response.get("ok"):
+                    logger.info("✅ Photo forwarded to Bale")
+                else:
+                    logger.error(f"❌ Bale photo send failed: {response}")
+            
+            elif content_type == "video":
+                form_data = aiohttp.FormData()
+                form_data.add_field('chat_id', BALE_CHAT_ID)
+                form_data.add_field('video', open(media_path, 'rb'), filename=os.path.basename(media_path))
+                if caption:
+                    form_data.add_field('caption', caption)
+                    form_data.add_field('parse_mode', 'HTML')
+                
+                response = await send_with_retry(session, BALE_SEND_VIDEO_URL, files=form_data)
+                if response and response.get("ok"):
+                    logger.info("✅ Video forwarded to Bale")
+                else:
+                    logger.error(f"❌ Bale video send failed: {response}")
+            
+            elif content_type == "audio":
+                form_data = aiohttp.FormData()
+                form_data.add_field('chat_id', BALE_CHAT_ID)
+                form_data.add_field('audio', open(media_path, 'rb'), filename=os.path.basename(media_path))
+                if caption:
+                    form_data.add_field('caption', caption)
+                    form_data.add_field('parse_mode', 'HTML')
+                
+                response = await send_with_retry(session, BALE_SEND_AUDIO_URL, files=form_data)
+                if response and response.get("ok"):
+                    logger.info("✅ Audio forwarded to Bale")
+                else:
+                    logger.error(f"❌ Bale audio send failed: {response}")
+            
+            elif content_type == "voice":
+                form_data = aiohttp.FormData()
+                form_data.add_field('chat_id', BALE_CHAT_ID)
+                form_data.add_field('voice', open(media_path, 'rb'), filename=os.path.basename(media_path))
+                
+                response = await send_with_retry(session, BALE_SEND_VOICE_URL, files=form_data)
+                if response and response.get("ok"):
+                    logger.info("✅ Voice forwarded to Bale")
+                else:
+                    logger.error(f"❌ Bale voice send failed: {response}")
             
             elif content_type == "media_group":
-                media_data = []
+                # Use file paths instead of handles
                 form_data = aiohttp.FormData()
+                media_data = []
                 
                 for i, path in enumerate(media_group):
-                    with open(path, 'rb') as file:
-                        media_type = "photo"
-                        media_dict = {
-                            "type": media_type,
-                            "media": f"attach://media_{i}",
-                            "parse_mode": "HTML"
-                        }
-                        if i == 0 and caption:
-                            media_dict["caption"] = caption
-                        media_data.append(media_dict)
-                        form_data.add_field(f'media_{i}', file, filename=os.path.basename(path))
+                    form_data.add_field(f'media_{i}', open(path, 'rb'), filename=os.path.basename(path))
+                    media_type = "photo"
+                    media_dict = {
+                        "type": media_type,
+                        "media": f"attach://media_{i}",
+                        "parse_mode": "HTML"
+                    }
+                    if i == 0 and caption:
+                        media_dict["caption"] = caption
+                    media_data.append(media_dict)
                 
                 form_data.add_field('chat_id', BALE_CHAT_ID)
                 form_data.add_field('media', str(media_data).replace("'", '"'))
@@ -168,48 +208,6 @@ async def forward_to_bale(content_type, caption=None, media_path=None, media_gro
                     logger.info("✅ Media group forwarded to Bale")
                 else:
                     logger.error(f"❌ Bale media group send failed: {response}")
-            
-            elif content_type == "video":
-                with open(media_path, 'rb') as file:
-                    form_data = aiohttp.FormData()
-                    form_data.add_field('chat_id', BALE_CHAT_ID)
-                    form_data.add_field('video', file, filename=os.path.basename(media_path))
-                    if caption:
-                        form_data.add_field('caption', caption)
-                        form_data.add_field('parse_mode', 'HTML')
-                    
-                    response = await send_with_retry(session, BALE_SEND_VIDEO_URL, files=form_data)
-                    if response and response.get("ok"):
-                        logger.info("✅ Video forwarded to Bale")
-                    else:
-                        logger.error(f"❌ Bale video send failed: {response}")
-            
-            elif content_type == "audio":
-                with open(media_path, 'rb') as file:
-                    form_data = aiohttp.FormData()
-                    form_data.add_field('chat_id', BALE_CHAT_ID)
-                    form_data.add_field('audio', file, filename=os.path.basename(media_path))
-                    if caption:
-                        form_data.add_field('caption', caption)
-                        form_data.add_field('parse_mode', 'HTML')
-                    
-                    response = await send_with_retry(session, BALE_SEND_AUDIO_URL, files=form_data)
-                    if response and response.get("ok"):
-                        logger.info("✅ Audio forwarded to Bale")
-                    else:
-                        logger.error(f"❌ Bale audio send failed: {response}")
-            
-            elif content_type == "voice":
-                with open(media_path, 'rb') as file:
-                    form_data = aiohttp.FormData()
-                    form_data.add_field('chat_id', BALE_CHAT_ID)
-                    form_data.add_field('voice', file, filename=os.path.basename(media_path))
-                    
-                    response = await send_with_retry(session, BALE_SEND_VOICE_URL, files=form_data)
-                    if response and response.get("ok"):
-                        logger.info("✅ Voice forwarded to Bale")
-                    else:
-                        logger.error(f"❌ Bale voice send failed: {response}")
     
     except Exception as e:
         logger.error(f"❌ Bale forwarding error: {str(e)}")
@@ -227,10 +225,18 @@ async def main():
     # Parse sources
     sources_list = [src.strip() for src in SOURCES.split(',')]
     
+    # Track album processing to prevent duplicate handling
+    active_albums = set()
+    
     async def process_message(event):
         """Process a single message with locking mechanism"""
         async with processing_lock:
             msg = event.message
+            
+            # Skip if this message is part of an album we're already processing
+            if msg.grouped_id and msg.grouped_id in active_albums:
+                return
+                
             chat = await event.get_chat()
             logger.info(f"📩 New message [ID: {msg.id}] in {chat.title} ({chat.id})")
             
@@ -296,35 +302,88 @@ async def main():
                 logger.error(f"❌ Processing failed: {str(e)}")
 
     async def process_album(event):
-        """Process media group (album)"""
+        """Process media group (album) with mixed media support"""
+        # Skip if we're already processing this album
+        album_id = event.messages[0].grouped_id
+        if album_id in active_albums:
+            return
+            
+        # Mark this album as being processed
+        active_albums.add(album_id)
+        
         async with processing_lock:
-            chat = await event.get_chat()
-            logger.info(f"🖼️ New media group [Count: {len(event.messages)}] in {chat.title} ({chat.id})")
-            
-            # Get caption from first message
-            caption = event.messages[0].text or ""
-            
             try:
+                chat = await event.get_chat()
+                logger.info(f"🖼️ New media group [Count: {len(event.messages)}] in {chat.title} ({chat.id})")
+                
+                # Get caption from first message
+                caption = event.messages[0].text or ""
+                
                 # Download all media in the group
                 media_paths = []
-                for msg in event.messages:
-                    if msg.media and isinstance(msg.media, MessageMediaPhoto):
-                        media_path = await msg.download_media(
-                            file=MEDIA_DIR,
-                            progress_callback=lambda current, total: logger.info(
-                                f"⬇️ Downloading album item: {current*100/total:.1f}%"
-                            )
-                        )
-                        media_paths.append(media_path)
-                        logger.info(f"✅ Downloaded album photo: \033[1;35m{media_path}\033[0m")
+                all_photos = True
                 
-                if media_paths:
-                    await forward_to_bale("media_group", caption=caption, media_group=media_paths)
+                for i, msg in enumerate(event.messages):
+                    if msg.media:
+                        try:
+                            # Download media
+                            media_path = await msg.download_media(
+                                file=MEDIA_DIR,
+                                progress_callback=lambda current, total: logger.info(
+                                    f"⬇️ Downloading album item {i+1}/{len(event.messages)}: {current*100/total:.1f}%"
+                                )
+                            )
+                            
+                            # Check if this is a photo
+                            is_photo = isinstance(msg.media, MessageMediaPhoto)
+                            
+                            # If it's a document, check if it's actually a photo
+                            if not is_photo and isinstance(msg.media, MessageMediaDocument):
+                                if msg.media.document.mime_type.startswith('image'):
+                                    is_photo = True
+                            
+                            # Track if all items are photos
+                            if not is_photo:
+                                all_photos = False
+                            
+                            media_paths.append((media_path, is_photo))
+                            logger.info(f"✅ Downloaded album item: \033[1;35m{media_path}\033[0m")
+                        except Exception as e:
+                            logger.error(f"❌ Failed to download album item {i+1}: {str(e)}")
+                    else:
+                        logger.info(f"📝 Album text message: {msg.text}")
+                
+                # If all items are photos, send as a media group
+                if all_photos and len(media_paths) > 1:
+                    logger.info("📸 All album items are photos - sending as media group")
+                    paths = [path for path, is_photo in media_paths]
+                    await forward_to_bale("media_group", caption=caption, media_group=paths)
                 else:
-                    logger.warning("⚠️ No valid photos found in media group")
-            
+                    # Send each item individually
+                    for i, (path, is_photo) in enumerate(media_paths):
+                        try:
+                            if is_photo:
+                                logger.info(f"🖼️ Sending album photo: \033[1;35m{path}\033[0m")
+                                await forward_to_bale("photo", caption=caption if i == 0 else None, media_path=path)
+                            else:
+                                # Check if it's a video
+                                if any(ext in path.lower() for ext in ['.mp4', '.mov', '.avi', '.mkv']):
+                                    logger.info(f"🎬 Sending album video: \033[1;35m{path}\033[0m")
+                                    await forward_to_bale("video", caption=caption if i == 0 else None, media_path=path)
+                                # Check if it's an audio file
+                                elif any(ext in path.lower() for ext in ['.mp3', '.m4a', '.wav', '.ogg']):
+                                    # Voice note should be short audio, but we'll send as audio for now
+                                    logger.info(f"🎧 Sending album audio: \033[1;35m{path}\033[0m")
+                                    await forward_to_bale("audio", caption=caption if i == 0 else None, media_path=path)
+                                else:
+                                    logger.warning(f"⚠️ Unsupported album file type: {path}")
+                        except Exception as e:
+                            logger.error(f"❌ Failed to send album item {i+1}: {str(e)}")
             except Exception as e:
                 logger.error(f"❌ Album processing failed: {str(e)}")
+            finally:
+                # Remove album from active processing
+                active_albums.discard(album_id)
 
     # Register handlers
     @client.on(events.Album(chats=sources_list))
