@@ -43,9 +43,6 @@ MEDIA_DIR = "media"
 os.makedirs(MEDIA_DIR, exist_ok=True)
 logger.info(f"📁 Media storage: {os.path.abspath(MEDIA_DIR)}")
 
-# Create processing lock to handle messages one by one
-processing_lock = asyncio.Lock()
-
 # Bale API endpoints
 BALE_API_URL = "https://tapi.bale.ai/bot{token}/{method}"
 BALE_SEND_MESSAGE_URL = BALE_API_URL.format(token=BALE_TOKEN, method="sendMessage")
@@ -217,106 +214,10 @@ async def forward_to_bale(content_type, caption=None, media_path=None, media_gro
     except Exception as e:
         logger.error(f"❌ Bale forwarding error: {str(e)}")
 
-async def process_message(event):
-    """Process a single message with locking mechanism"""
-    async with processing_lock:
-        msg = event.message
-        chat = await event.get_chat()
-        logger.info(f"📩 New message [ID: {msg.id}] in {chat.title} ({chat.id})")
-        
-        # Prepare caption (text content)
-        caption = msg.text or ""
-        
-        try:
-            # Handle text message
-            if not msg.media:
-                logger.info(f"📝 Text message: {caption}")
-                await forward_to_bale("text", caption=caption)
-            
-            # Handle media messages
-            else:
-                # Handle photo (single or album)
-                if isinstance(msg.media, MessageMediaPhoto):
-                    # Check if part of media group
-                    if msg.grouped_id:
-                        logger.info("⏭️ Part of media group - will process as album")
-                        return
-                    
-                    # Single photo
-                    media_path = await msg.download_media(
-                        file=MEDIA_DIR,
-                        progress_callback=lambda current, total: logger.info(
-                            f"⬇️ Downloading: {current*100/total:.1f}%"
-                        )
-                    )
-                    logger.info(f"✅ Downloaded photo: \033[1;35m{media_path}\033[0m")
-                    await forward_to_bale("photo", caption=caption, media_path=media_path)
-                
-                # Handle documents (could be video, audio, voice, etc.)
-                elif isinstance(msg.media, MessageMediaDocument):
-                    # Get file attributes
-                    attributes = msg.media.document.attributes
-                    file_name = next((attr.file_name for attr in attributes if hasattr(attr, 'file_name')), None)
-                    
-                    # Download the file
-                    media_path = await msg.download_media(
-                        file=MEDIA_DIR,
-                        progress_callback=lambda current, total: logger.info(
-                            f"⬇️ Downloading: {current*100/total:.1f}%"
-                        )
-                    )
-                    
-                    # Determine file type
-                    mime_type = msg.media.document.mime_type
-                    if mime_type.startswith('video'):
-                        logger.info(f"🎥 Downloaded video: \033[1;35m{media_path}\033[0m")
-                        await forward_to_bale("video", caption=caption, media_path=media_path)
-                    elif mime_type.startswith('audio'):
-                        logger.info(f"🎵 Downloaded audio: \033[1;35m{media_path}\033[0m")
-                        await forward_to_bale("audio", caption=caption, media_path=media_path)
-                    elif mime_type == 'audio/ogg' or (file_name and file_name.endswith('.ogg')):
-                        logger.info(f"🎤 Downloaded voice: \033[1;35m{media_path}\033[0m")
-                        await forward_to_bale("voice", media_path=media_path)
-                    else:
-                        logger.warning(f"⚠️ Unsupported document type: {mime_type}")
-                else:
-                    logger.warning(f"⚠️ Unsupported media type: {type(msg.media).__name__}")
-        
-        except Exception as e:
-            logger.error(f"❌ Processing failed: {str(e)}")
-
-async def process_album(event):
-    """Process media group (album)"""
-    async with processing_lock:
-        chat = await event.get_chat()
-        logger.info(f"🖼️ New media group [Count: {len(event.messages)}] in {chat.title} ({chat.id})")
-        
-        # Get caption from first message
-        caption = event.messages[0].text or ""
-        
-        try:
-            # Download all media in the group
-            media_paths = []
-            for msg in event.messages:
-                if msg.media and isinstance(msg.media, MessageMediaPhoto):
-                    media_path = await msg.download_media(
-                        file=MEDIA_DIR,
-                        progress_callback=lambda current, total: logger.info(
-                            f"⬇️ Downloading album item: {current*100/total:.1f}%"
-                        )
-                    )
-                    media_paths.append(media_path)
-                    logger.info(f"✅ Downloaded album photo: \033[1;35m{media_path}\033[0m")
-            
-            if media_paths:
-                await forward_to_bale("media_group", caption=caption, media_group=media_paths)
-            else:
-                logger.warning("⚠️ No valid photos found in media group")
-        
-        except Exception as e:
-            logger.error(f"❌ Album processing failed: {str(e)}")
-
 async def main():
+    # Create processing lock inside the event loop context
+    processing_lock = asyncio.Lock()
+    
     client = TelegramClient(
         StringSession(SESSION_STRING),
         API_ID,
@@ -326,6 +227,105 @@ async def main():
     # Parse sources
     sources_list = [src.strip() for src in SOURCES.split(',')]
     
+    async def process_message(event):
+        """Process a single message with locking mechanism"""
+        async with processing_lock:
+            msg = event.message
+            chat = await event.get_chat()
+            logger.info(f"📩 New message [ID: {msg.id}] in {chat.title} ({chat.id})")
+            
+            # Prepare caption (text content)
+            caption = msg.text or ""
+            
+            try:
+                # Handle text message
+                if not msg.media:
+                    logger.info(f"📝 Text message: {caption}")
+                    await forward_to_bale("text", caption=caption)
+                
+                # Handle media messages
+                else:
+                    # Handle photo (single or album)
+                    if isinstance(msg.media, MessageMediaPhoto):
+                        # Check if part of media group
+                        if msg.grouped_id:
+                            logger.info("⏭️ Part of media group - will process as album")
+                            return
+                        
+                        # Single photo
+                        media_path = await msg.download_media(
+                            file=MEDIA_DIR,
+                            progress_callback=lambda current, total: logger.info(
+                                f"⬇️ Downloading: {current*100/total:.1f}%"
+                            )
+                        )
+                        logger.info(f"✅ Downloaded photo: \033[1;35m{media_path}\033[0m")
+                        await forward_to_bale("photo", caption=caption, media_path=media_path)
+                    
+                    # Handle documents (could be video, audio, voice, etc.)
+                    elif isinstance(msg.media, MessageMediaDocument):
+                        # Get file attributes
+                        attributes = msg.media.document.attributes
+                        file_name = next((attr.file_name for attr in attributes if hasattr(attr, 'file_name')), None)
+                        
+                        # Download the file
+                        media_path = await msg.download_media(
+                            file=MEDIA_DIR,
+                            progress_callback=lambda current, total: logger.info(
+                                f"⬇️ Downloading: {current*100/total:.1f}%"
+                            )
+                        )
+                        
+                        # Determine file type
+                        mime_type = msg.media.document.mime_type
+                        if mime_type.startswith('video'):
+                            logger.info(f"🎥 Downloaded video: \033[1;35m{media_path}\033[0m")
+                            await forward_to_bale("video", caption=caption, media_path=media_path)
+                        elif mime_type.startswith('audio'):
+                            logger.info(f"🎵 Downloaded audio: \033[1;35m{media_path}\033[0m")
+                            await forward_to_bale("audio", caption=caption, media_path=media_path)
+                        elif mime_type == 'audio/ogg' or (file_name and file_name.endswith('.ogg')):
+                            logger.info(f"🎤 Downloaded voice: \033[1;35m{media_path}\033[0m")
+                            await forward_to_bale("voice", media_path=media_path)
+                        else:
+                            logger.warning(f"⚠️ Unsupported document type: {mime_type}")
+                    else:
+                        logger.warning(f"⚠️ Unsupported media type: {type(msg.media).__name__}")
+            
+            except Exception as e:
+                logger.error(f"❌ Processing failed: {str(e)}")
+
+    async def process_album(event):
+        """Process media group (album)"""
+        async with processing_lock:
+            chat = await event.get_chat()
+            logger.info(f"🖼️ New media group [Count: {len(event.messages)}] in {chat.title} ({chat.id})")
+            
+            # Get caption from first message
+            caption = event.messages[0].text or ""
+            
+            try:
+                # Download all media in the group
+                media_paths = []
+                for msg in event.messages:
+                    if msg.media and isinstance(msg.media, MessageMediaPhoto):
+                        media_path = await msg.download_media(
+                            file=MEDIA_DIR,
+                            progress_callback=lambda current, total: logger.info(
+                                f"⬇️ Downloading album item: {current*100/total:.1f}%"
+                            )
+                        )
+                        media_paths.append(media_path)
+                        logger.info(f"✅ Downloaded album photo: \033[1;35m{media_path}\033[0m")
+                
+                if media_paths:
+                    await forward_to_bale("media_group", caption=caption, media_group=media_paths)
+                else:
+                    logger.warning("⚠️ No valid photos found in media group")
+            
+            except Exception as e:
+                logger.error(f"❌ Album processing failed: {str(e)}")
+
     # Register handlers
     @client.on(events.Album(chats=sources_list))
     async def album_handler(event):
