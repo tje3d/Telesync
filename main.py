@@ -72,8 +72,8 @@ BALE_EDIT_CAPTION_URL = BALE_API_URL.format(token=BALE_TOKEN, method="editMessag
 BALE_DELETE_MESSAGE_URL = BALE_API_URL.format(token=BALE_TOKEN, method="deleteMessage")
 
 # Retry configuration
-MAX_RETRY_TIME = 2 * 60 * 60  # 2 hours in seconds
-MAX_RETRY_DELAY = 60  # Max delay between retries in seconds
+MAX_RETRY_TIME = 5 * 60  # 5 minutes in seconds
+MAX_RETRY_DELAY = 30  # Max delay between retries in seconds
 INITIAL_RETRY_DELAY = 1  # Initial retry delay in seconds
 RETRY_EXPONENT = 2  # Exponential backoff factor
 
