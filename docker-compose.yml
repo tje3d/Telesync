@@ -8,8 +8,6 @@ services:
     working_dir: /app
     volumes:
       - ./:/app
-      - ./media:/app/media
-      - ./message_mappings.db:/app/message_mappings.db
     environment:
       - TZ=Asia/Tehran  # Set your timezone
     command: >
