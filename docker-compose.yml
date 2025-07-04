@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  telegram-forwarder:
+    image: python:3.9-slim
+    container_name: telegram-forwarder
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ./:/app
+      - ./media:/app/media
+      - ./message_mappings.db:/app/message_mappings.db
+    environment:
+      - TZ=Asia/Tehran  # Set your timezone
+    command: >
+      sh -c "pip install --no-cache-dir -r requirements.txt &&
+             python -u main.py"
+    depends_on:
+      - watchtower
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Log management container (optional)
+  watchtower:
+    image: containrrr/watchtower
+    container_name: watchtower
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --cleanup --interval 300
+    restart: unless-stopped
