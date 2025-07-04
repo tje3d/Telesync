@@ -5,6 +5,7 @@ import sys
 import random
 import time
 import json
+import sqlite3
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
@@ -44,10 +45,30 @@ MEDIA_DIR = "media"
 os.makedirs(MEDIA_DIR, exist_ok=True)
 logger.info(f"📁 Media storage: {os.path.abspath(MEDIA_DIR)}")
 
+# Database setup
+DB_FILE = "message_mappings.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS messages
+                 (telegram_id INTEGER PRIMARY KEY,
+                  bale_ids TEXT,
+                  is_album BOOLEAN,
+                  first_message BOOLEAN,
+                  chat_id INTEGER)''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
 # Bale API endpoints
 BALE_API_URL = "https://tapi.bale.ai/bot{token}/{method}"
 BALE_SEND_MESSAGE_URL = BALE_API_URL.format(token=BALE_TOKEN, method="sendMessage")
 BALE_SEND_MEDIA_GROUP_URL = BALE_API_URL.format(token=BALE_TOKEN, method="sendMediaGroup")
+BALE_EDIT_TEXT_URL = BALE_API_URL.format(token=BALE_TOKEN, method="editMessageText")
+BALE_EDIT_CAPTION_URL = BALE_API_URL.format(token=BALE_TOKEN, method="editMessageCaption")
+BALE_DELETE_MESSAGE_URL = BALE_API_URL.format(token=BALE_TOKEN, method="deleteMessage")
 
 # Retry configuration
 MAX_RETRY_TIME = 2 * 60 * 60  # 2 hours in seconds
@@ -109,6 +130,40 @@ async def send_with_retry(session, url, payload=None, files=None):
     logger.error(f"🔥 Forwarding failed after {attempt} attempts over {MAX_RETRY_TIME/60:.1f} minutes")
     return None
 
+def store_message_mapping(telegram_id, bale_ids, is_album=False, first_message=False):
+    """Store message mapping in database"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    bale_ids_json = json.dumps(bale_ids)
+    c.execute('''INSERT OR REPLACE INTO messages 
+                 (telegram_id, bale_ids, is_album, first_message, chat_id) 
+                 VALUES (?, ?, ?, ?, ?)''',
+              (telegram_id, bale_ids_json, is_album, first_message, BALE_CHAT_ID))
+    conn.commit()
+    conn.close()
+
+def get_message_mapping(telegram_id):
+    """Get message mapping from database"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''SELECT bale_ids, is_album, first_message 
+                 FROM messages WHERE telegram_id = ?''', (telegram_id,))
+    row = c.fetchone()
+    conn.close()
+    
+    if row:
+        bale_ids = json.loads(row[0])
+        return bale_ids, row[1], row[2]
+    return None, None, None
+
+def delete_message_mapping(telegram_id):
+    """Delete message mapping from database"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''DELETE FROM messages WHERE telegram_id = ?''', (telegram_id,))
+    conn.commit()
+    conn.close()
+
 async def forward_to_bale(content_type, caption=None, media_path=None, media_group=None):
     """Forward content to Bale Messenger with robust retry mechanism"""
     try:
@@ -121,9 +176,12 @@ async def forward_to_bale(content_type, caption=None, media_path=None, media_gro
                 }
                 response = await send_with_retry(session, BALE_SEND_MESSAGE_URL, payload=payload)
                 if response and response.get("ok"):
+                    bale_id = response['result']['message_id']
                     logger.info("✅ Text forwarded to Bale")
+                    return [bale_id]
                 else:
                     logger.error(f"❌ Bale text send failed: {response}")
+                    return []
             
             elif content_type == "media_group":
                 media_data = []
@@ -163,12 +221,64 @@ async def forward_to_bale(content_type, caption=None, media_path=None, media_gro
                 
                 response = await send_with_retry(session, BALE_SEND_MEDIA_GROUP_URL, files=form_data)
                 if response and response.get("ok"):
+                    bale_ids = [msg['message_id'] for msg in response['result']]
                     logger.info("✅ Media group forwarded to Bale")
+                    return bale_ids
                 else:
                     logger.error(f"❌ Bale media group send failed: {response}")
+                    return []
     
     except Exception as e:
         logger.error(f"❌ Bale forwarding error: {str(e)}")
+        return []
+
+async def edit_bale_message(bale_id, new_content, is_text=False):
+    """Edit an existing Bale message text or caption"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Choose appropriate endpoint based on message type
+            if is_text:
+                url = BALE_EDIT_TEXT_URL
+                payload_key = "text"
+            else:
+                url = BALE_EDIT_CAPTION_URL
+                payload_key = "caption"
+            
+            payload = {
+                "chat_id": BALE_CHAT_ID,
+                "message_id": bale_id,
+                payload_key: new_content,
+                "parse_mode": "HTML"
+            }
+            response = await send_with_retry(session, url, payload=payload)
+            if response and response.get("ok"):
+                logger.info(f"✏️ Edited Bale message: {bale_id}")
+                return True
+            else:
+                logger.error(f"❌ Bale edit failed: {response}")
+                return False
+    except Exception as e:
+        logger.error(f"❌ Bale edit error: {str(e)}")
+        return False
+
+async def delete_bale_message(bale_id):
+    """Delete a Bale message"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            payload = {
+                "chat_id": BALE_CHAT_ID,
+                "message_id": bale_id
+            }
+            response = await send_with_retry(session, BALE_DELETE_MESSAGE_URL, payload=payload)
+            if response and response.get("ok"):
+                logger.info(f"🗑️ Deleted Bale message: {bale_id}")
+                return True
+            else:
+                logger.error(f"❌ Bale delete failed: {response}")
+                return False
+    except Exception as e:
+        logger.error(f"❌ Bale delete error: {str(e)}")
+        return False
 
 async def main():
     # Create processing lock inside the event loop context
@@ -186,7 +296,7 @@ async def main():
     # Track album processing to prevent duplicate handling
     active_albums = set()
     
-    async def process_message(event):
+    async def process_message(event, is_edit=False):
         """Process a single message with locking mechanism"""
         async with processing_lock:
             msg = event.message
@@ -196,16 +306,41 @@ async def main():
                 return
                 
             chat = await event.get_chat()
-            logger.info(f"📩 New message [ID: {msg.id}] in {chat.title} ({chat.id})")
+            action = "Edited" if is_edit else "New"
+            logger.info(f"📩 {action} message [ID: {msg.id}] in {chat.title} ({chat.id})")
             
             # Prepare caption (text content)
             caption = msg.text or ""
             
             try:
+                # Handle edit scenario
+                if is_edit:
+                    bale_ids, is_album, first_message = get_message_mapping(msg.id)
+                    
+                    # If we have a mapping and it's the first message (with content)
+                    if bale_ids and first_message:
+                        # Determine if this is a text message (no media)
+                        is_text = not msg.media
+                        
+                        # For albums, edit the first Bale message (caption)
+                        if is_album:
+                            await edit_bale_message(bale_ids[0], caption, is_text=False)
+                        # For single messages, edit based on type
+                        else:
+                            await edit_bale_message(bale_ids[0], caption, is_text=is_text)
+                    return
+                
                 # Handle text message
                 if not msg.media:
                     logger.info(f"📝 Text message: {caption}")
-                    await forward_to_bale("text", caption=caption)
+                    bale_ids = await forward_to_bale("text", caption=caption)
+                    if bale_ids:
+                        store_message_mapping(
+                            msg.id, 
+                            bale_ids, 
+                            is_album=False,
+                            first_message=True
+                        )
                 
                 # Handle media messages
                 else:
@@ -224,11 +359,18 @@ async def main():
                             )
                         )
                         logger.info(f"✅ Downloaded photo: \033[1;35m{media_path}\033[0m")
-                        await forward_to_bale(
+                        bale_ids = await forward_to_bale(
                             "media_group", 
                             caption=caption, 
                             media_group=[{"path": media_path, "type": "photo"}]
                         )
+                        if bale_ids:
+                            store_message_mapping(
+                                msg.id, 
+                                bale_ids, 
+                                is_album=False,
+                                first_message=True
+                            )
                     
                     # Handle documents (could be video, audio, voice, etc.)
                     elif isinstance(msg.media, MessageMediaDocument):
@@ -246,29 +388,32 @@ async def main():
                         
                         # Determine file type
                         mime_type = msg.media.document.mime_type
+                        media_type = "document"
+                        
                         if mime_type.startswith('video'):
+                            media_type = "video"
                             logger.info(f"🎥 Downloaded video: \033[1;35m{media_path}\033[0m")
-                            await forward_to_bale(
-                                "media_group", 
-                                caption=caption, 
-                                media_group=[{"path": media_path, "type": "video"}]
-                            )
                         elif mime_type.startswith('audio'):
+                            media_type = "audio"
                             logger.info(f"🎵 Downloaded audio: \033[1;35m{media_path}\033[0m")
-                            await forward_to_bale(
-                                "media_group", 
-                                caption=caption, 
-                                media_group=[{"path": media_path, "type": "audio"}]
-                            )
                         elif mime_type == 'audio/ogg' or (file_name and file_name.endswith('.ogg')):
+                            media_type = "voice"
                             logger.info(f"🎤 Downloaded voice: \033[1;35m{media_path}\033[0m")
-                            await forward_to_bale(
-                                "media_group", 
-                                caption=caption, 
-                                media_group=[{"path": media_path, "type": "voice"}]
-                            )
                         else:
                             logger.warning(f"⚠️ Unsupported document type: {mime_type}")
+                        
+                        bale_ids = await forward_to_bale(
+                            "media_group", 
+                            caption=caption, 
+                            media_group=[{"path": media_path, "type": media_type}]
+                        )
+                        if bale_ids:
+                            store_message_mapping(
+                                msg.id, 
+                                bale_ids, 
+                                is_album=False,
+                                first_message=True
+                            )
                     else:
                         logger.warning(f"⚠️ Unsupported media type: {type(msg.media).__name__}")
             
@@ -338,12 +483,43 @@ async def main():
                 
                 # Send as a media group
                 if media_group:
-                    await forward_to_bale("media_group", caption=caption, media_group=media_group)
+                    bale_ids = await forward_to_bale("media_group", caption=caption, media_group=media_group)
+                    if bale_ids:
+                        # Store mapping for all messages in the album
+                        for i, msg in enumerate(event.messages):
+                            store_message_mapping(
+                                msg.id,
+                                bale_ids,
+                                is_album=True,
+                                first_message=(i == 0)
+                            )  # Only first message has caption
             except Exception as e:
                 logger.error(f"❌ Album processing failed: {str(e)}")
             finally:
                 # Remove album from active processing
                 active_albums.discard(album_id)
+
+    async def handle_edit(event):
+        """Handle message edit events"""
+        await process_message(event, is_edit=True)
+
+    async def handle_delete(event):
+        """Handle message delete events"""
+        msg = event.deleted_id
+        chat = await event.get_chat()
+        logger.info(f"🗑️ Deleted message [ID: {msg}] in {chat.title} ({chat.id})")
+        
+        bale_ids, is_album, first_message = get_message_mapping(msg)
+        
+        if bale_ids:
+            # Delete all associated Bale messages
+            for bale_id in bale_ids:
+                await delete_bale_message(bale_id)
+            
+            # Remove from database
+            delete_message_mapping(msg)
+        else:
+            logger.info("ℹ️ No mapping found for deleted message")
 
     # Register handlers
     @client.on(events.Album(chats=sources_list))
@@ -356,6 +532,14 @@ async def main():
         if event.message.grouped_id:
             return
         await process_message(event)
+    
+    @client.on(events.MessageEdited(chats=sources_list))
+    async def edit_handler(event):
+        await handle_edit(event)
+    
+    @client.on(events.MessageDeleted(chats=sources_list))
+    async def delete_handler(event):
+        await handle_delete(event)
 
     await client.start()
     logger.info(f"👀 Monitoring started for {len(sources_list)} sources:")
@@ -365,6 +549,7 @@ async def main():
     # Log Bale configuration
     logger.info(f"🤖 Bale forwarding configured to chat: {BALE_CHAT_ID}")
     logger.info(f"🔄 Retry configured: 2 hours max, {MAX_RETRY_DELAY}s max delay")
+    logger.info(f"💾 Message mapping database: {os.path.abspath(DB_FILE)}")
     
     await client.run_until_disconnected()
 

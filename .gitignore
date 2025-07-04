@@ -17,3 +17,5 @@ media/
 
 # System files
 .DS_Store
+
+message_mappings.db
