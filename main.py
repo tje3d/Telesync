@@ -11,6 +11,7 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 import aiohttp
+import datetime
 
 # Load environment variables
 load_dotenv()
@@ -129,6 +130,32 @@ async def send_with_retry(session, url, payload=None, files=None):
     
     logger.error(f"🔥 Forwarding failed after {attempt} attempts over {MAX_RETRY_TIME/60:.1f} minutes")
     return None
+
+async def clean_old_media():
+    """Removes media files older than 12 hours from the MEDIA_DIR."""
+    logger.info("🧹 Starting old media cleanup...")
+    now = datetime.datetime.now()
+    twelve_hours_ago = now - datetime.timedelta(hours=12)
+    
+    deleted_count = 0
+    for filename in os.listdir(MEDIA_DIR):
+        file_path = os.path.join(MEDIA_DIR, filename)
+        if os.path.isfile(file_path):
+            try:
+                # Get file modification time
+                mod_timestamp = os.path.getmtime(file_path)
+                mod_datetime = datetime.datetime.fromtimestamp(mod_timestamp)
+                
+                if mod_datetime < twelve_hours_ago:
+                    os.remove(file_path)
+                    logger.info(f"🗑️ Deleted old media file: {filename}")
+                    deleted_count += 1
+            except Exception as e:
+                logger.error(f"❌ Error deleting file {filename}: {e}")
+    
+    logger.info(f"✅ Old media cleanup finished. Deleted {deleted_count} files.")
+
+
 
 def store_message_mapping(telegram_id, bale_ids, is_album=False, first_message=False):
     """Store message mapping in database"""
@@ -289,6 +316,15 @@ async def main():
         API_ID,
         API_HASH
     )
+
+    # Schedule hourly media cleanup
+    async def hourly_cleanup_task():
+        while True:
+            await clean_old_media()
+            await asyncio.sleep(60 * 60)  # Wait for 1 hour (3600 seconds)
+
+    # Start the hourly cleanup task in the background
+    asyncio.create_task(hourly_cleanup_task())
 
     # Parse sources
     sources_list = [src.strip() for src in SOURCES.split(',')]
