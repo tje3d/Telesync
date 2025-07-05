@@ -23,17 +23,23 @@ API_HASH = os.getenv('API_HASH')
 SESSION_STRING = os.getenv('SESSION_STRING', '')
 SOURCES = os.getenv('SOURCES')
 BALE_TOKEN = os.getenv('BALE_TOKEN')
-BALE_CHAT_ID = os.getenv('BALE_CHAT_ID')
+BALE_CHAT_IDS = os.getenv('BALE_CHAT_IDS')
 
-# Parse translation language from BALE_CHAT_ID if specified
-TRANSLATE_LANG = None
-if BALE_CHAT_ID and ':' in BALE_CHAT_ID:
-    chat_id_parts = BALE_CHAT_ID.split(':', 1)
-    BALE_CHAT_ID = chat_id_parts[0]
-    TRANSLATE_LANG = chat_id_parts[1].lower()
+# Parse multiple Bale chat IDs with optional translation languages
+CHAT_CONFIGS = []
+if BALE_CHAT_IDS:
+    for item in BALE_CHAT_IDS.split(','):
+        item = item.strip()
+        if ':' in item:
+            parts = item.split(':', 1)
+            chat_id = parts[0].strip()
+            lang = parts[1].strip().lower()
+            CHAT_CONFIGS.append((chat_id, lang))
+        else:
+            CHAT_CONFIGS.append((item, None))
 
 # Validate configuration
-required_vars = [API_ID, API_HASH, SOURCES, BALE_TOKEN, BALE_CHAT_ID]
+required_vars = [API_ID, API_HASH, SOURCES, BALE_TOKEN, CHAT_CONFIGS]
 if not all(required_vars):
     print("❌ Missing required environment variables in .env file!")
     print("Please ensure all required variables are set")
@@ -49,11 +55,13 @@ logging.basicConfig(
 # Create logger instance
 logger = logging.getLogger(__name__)
 
-# Log translation status
-if TRANSLATE_LANG:
-    logger.info(f"🌐 Translation enabled to: {TRANSLATE_LANG}")
-else:
-    logger.info("🌐 No translation specified")
+# Log chat configurations
+logger.info(f"🤖 Forwarding to {len(CHAT_CONFIGS)} Bale chats:")
+for chat_id, lang in CHAT_CONFIGS:
+    if lang:
+        logger.info(f"   - Chat ID: {chat_id} (Translation to: {lang})")
+    else:
+        logger.info(f"   - Chat ID: {chat_id} (No translation)")
 
 # Create media directory if not exists
 MEDIA_DIR = "media"
@@ -67,23 +75,20 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS messages
-                 (telegram_id INTEGER PRIMARY KEY,
+                 (telegram_id INTEGER,
+                  bale_chat_id TEXT,
                   bale_ids TEXT,
                   is_album BOOLEAN,
                   first_message BOOLEAN,
-                  chat_id INTEGER)''')
+                  PRIMARY KEY (telegram_id, bale_chat_id))''')
     conn.commit()
     conn.close()
 
 init_db()
 
 # Bale API endpoints
-BALE_API_URL = "https://tapi.bale.ai/bot{token}/{method}"
-BALE_SEND_MESSAGE_URL = BALE_API_URL.format(token=BALE_TOKEN, method="sendMessage")
-BALE_SEND_MEDIA_GROUP_URL = BALE_API_URL.format(token=BALE_TOKEN, method="sendMediaGroup")
-BALE_EDIT_TEXT_URL = BALE_API_URL.format(token=BALE_TOKEN, method="editMessageText")
-BALE_EDIT_CAPTION_URL = BALE_API_URL.format(token=BALE_TOKEN, method="editMessageCaption")
-BALE_DELETE_MESSAGE_URL = BALE_API_URL.format(token=BALE_TOKEN, method="deleteMessage")
+def get_bale_api_url(method):
+    return f"https://tapi.bale.ai/bot{BALE_TOKEN}/{method}"
 
 # Retry configuration
 MAX_RETRY_TIME = 5 * 60  # 5 minutes in seconds
@@ -182,26 +187,25 @@ async def clean_old_media():
     
     logger.info(f"✅ Old media cleanup finished. Deleted {deleted_count} files.")
 
-
-
-def store_message_mapping(telegram_id, bale_ids, is_album=False, first_message=False):
+def store_message_mapping(telegram_id, bale_chat_id, bale_ids, is_album=False, first_message=False):
     """Store message mapping in database"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     bale_ids_json = json.dumps(bale_ids)
     c.execute('''INSERT OR REPLACE INTO messages 
-                 (telegram_id, bale_ids, is_album, first_message, chat_id) 
+                 (telegram_id, bale_chat_id, bale_ids, is_album, first_message) 
                  VALUES (?, ?, ?, ?, ?)''',
-              (telegram_id, bale_ids_json, is_album, first_message, BALE_CHAT_ID))
+              (telegram_id, bale_chat_id, bale_ids_json, is_album, first_message))
     conn.commit()
     conn.close()
 
-def get_message_mapping(telegram_id):
-    """Get message mapping from database"""
+def get_message_mapping(telegram_id, bale_chat_id):
+    """Get message mapping from database for specific chat"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''SELECT bale_ids, is_album, first_message 
-                 FROM messages WHERE telegram_id = ?''', (telegram_id,))
+                 FROM messages WHERE telegram_id = ? AND bale_chat_id = ?''', 
+              (telegram_id, bale_chat_id))
     row = c.fetchone()
     conn.close()
     
@@ -210,31 +214,61 @@ def get_message_mapping(telegram_id):
         return bale_ids, row[1], row[2]
     return None, None, None
 
-def delete_message_mapping(telegram_id):
-    """Delete message mapping from database"""
+def get_all_message_mappings(telegram_id):
+    """Get all message mappings for a Telegram message ID"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''SELECT bale_chat_id, bale_ids, is_album, first_message 
+                 FROM messages WHERE telegram_id = ?''', (telegram_id,))
+    rows = c.fetchall()
+    conn.close()
+    
+    results = []
+    for row in rows:
+        bale_ids = json.loads(row[1])
+        results.append((row[0], bale_ids, row[2], row[3]))
+    return results
+
+def delete_message_mapping(telegram_id, bale_chat_id):
+    """Delete specific message mapping from database"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''DELETE FROM messages WHERE telegram_id = ? AND bale_chat_id = ?''', 
+              (telegram_id, bale_chat_id))
+    conn.commit()
+    conn.close()
+
+def delete_all_message_mappings(telegram_id):
+    """Delete all mappings for a Telegram message ID"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''DELETE FROM messages WHERE telegram_id = ?''', (telegram_id,))
     conn.commit()
     conn.close()
 
-async def forward_to_bale(content_type, caption=None, media_path=None, media_group=None):
-    """Forward content to Bale Messenger with robust retry mechanism"""
+async def forward_to_bale(content_type, caption=None, media_path=None, media_group=None, 
+                          chat_id=None, lang=None):
+    """Forward content to Bale Messenger for a specific chat"""
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as session:
+            # Translate caption if needed
+            if lang and caption:
+                caption = await translate_text(caption, lang)
+            
             if content_type == "text":
                 payload = {
-                    "chat_id": BALE_CHAT_ID,
+                    "chat_id": chat_id,
                     "text": caption,
                     "parse_mode": "HTML"
                 }
-                response = await send_with_retry(session, BALE_SEND_MESSAGE_URL, payload=payload)
+                send_url = get_bale_api_url("sendMessage")
+                response = await send_with_retry(session, send_url, payload=payload)
                 if response and response.get("ok"):
                     bale_id = response['result']['message_id']
-                    logger.info("✅ Text forwarded to Bale")
+                    logger.info(f"✅ Text forwarded to Bale chat {chat_id}")
                     return [bale_id]
                 else:
-                    logger.error(f"❌ Bale text send failed: {response}")
+                    logger.error(f"❌ Bale text send failed for chat {chat_id}: {response}")
                     return []
             
             elif content_type == "media_group":
@@ -270,72 +304,74 @@ async def forward_to_bale(content_type, caption=None, media_path=None, media_gro
                     media_data.append(media_dict)
                 
                 # Add chat ID and media array
-                form_data.add_field('chat_id', BALE_CHAT_ID)
+                form_data.add_field('chat_id', chat_id)
                 form_data.add_field('media', json.dumps(media_data))
                 
-                response = await send_with_retry(session, BALE_SEND_MEDIA_GROUP_URL, files=form_data)
+                send_url = get_bale_api_url("sendMediaGroup")
+                response = await send_with_retry(session, send_url, files=form_data)
                 if response and response.get("ok"):
                     bale_ids = [msg['message_id'] for msg in response['result']]
-                    logger.info("✅ Media group forwarded to Bale")
+                    logger.info(f"✅ Media group forwarded to Bale chat {chat_id}")
                     return bale_ids
                 else:
-                    logger.error(f"❌ Bale media group send failed: {response}")
+                    logger.error(f"❌ Bale media group send failed for chat {chat_id}: {response}")
                     return []
     
     except Exception as e:
-        logger.error(f"❌ Bale forwarding error: {str(e)}")
+        logger.error(f"❌ Bale forwarding error for chat {chat_id}: {str(e)}")
         return []
 
-async def edit_bale_message(bale_id, new_content, is_text=False):
-    """Edit an existing Bale message text or caption"""
+async def edit_bale_message(bale_id, new_content, chat_id, lang=None, is_text=False):
+    """Edit an existing Bale message text or caption for a specific chat"""
     try:
         async with aiohttp.ClientSession() as session:
-            if TRANSLATE_LANG and new_content:
-                logger.info(f"🌐 Translating edit to {TRANSLATE_LANG}...")
-                new_content = await translate_text(new_content, TRANSLATE_LANG)
+            # Translate content if needed
+            if lang and new_content:
+                new_content = await translate_text(new_content, lang)
 
             # Choose appropriate endpoint based on message type
             if is_text:
-                url = BALE_EDIT_TEXT_URL
+                url = get_bale_api_url("editMessageText")
                 payload_key = "text"
             else:
-                url = BALE_EDIT_CAPTION_URL
+                url = get_bale_api_url("editMessageCaption")
                 payload_key = "caption"
             
             payload = {
-                "chat_id": BALE_CHAT_ID,
+                "chat_id": chat_id,
                 "message_id": bale_id,
                 payload_key: new_content,
                 "parse_mode": "HTML"
             }
             response = await send_with_retry(session, url, payload=payload)
             if response and response.get("ok"):
-                logger.info(f"✏️ Edited Bale message: {bale_id}")
+                logger.info(f"✏️ Edited Bale message {bale_id} in chat {chat_id}")
                 return True
             else:
-                logger.error(f"❌ Bale edit failed: {response}")
+                logger.error(f"❌ Bale edit failed for chat {chat_id}: {response}")
                 return False
     except Exception as e:
-        logger.error(f"❌ Bale edit error: {str(e)}")
+        logger.error(f"❌ Bale edit error for chat {chat_id}: {str(e)}")
         return False
 
-async def delete_bale_message(bale_id):
-    """Delete a Bale message"""
+async def delete_bale_message(bale_id, chat_id):
+    """Delete a Bale message in a specific chat"""
     try:
         async with aiohttp.ClientSession() as session:
             payload = {
-                "chat_id": BALE_CHAT_ID,
+                "chat_id": chat_id,
                 "message_id": bale_id
             }
-            response = await send_with_retry(session, BALE_DELETE_MESSAGE_URL, payload=payload)
+            url = get_bale_api_url("deleteMessage")
+            response = await send_with_retry(session, url, payload=payload)
             if response and response.get("ok"):
-                logger.info(f"🗑️ Deleted Bale message: {bale_id}")
+                logger.info(f"🗑️ Deleted Bale message {bale_id} in chat {chat_id}")
                 return True
             else:
-                logger.error(f"❌ Bale delete failed: {response}")
+                logger.error(f"❌ Bale delete failed for chat {chat_id}: {response}")
                 return False
     except Exception as e:
-        logger.error(f"❌ Bale delete error: {str(e)}")
+        logger.error(f"❌ Bale delete error for chat {chat_id}: {str(e)}")
         return False
 
 async def main():
@@ -378,40 +414,68 @@ async def main():
             
             # Prepare caption (text content)
             caption = msg.text or ""
-
-            if TRANSLATE_LANG and caption:
-                logger.info(f"🌐 Translating to {TRANSLATE_LANG}...")
-                caption = await translate_text(caption, TRANSLATE_LANG)
             
             try:
                 # Handle edit scenario
                 if is_edit:
-                    bale_ids, is_album, first_message = get_message_mapping(msg.id)
+                    # Get all mappings for this message
+                    mappings = get_all_message_mappings(msg.id)
+                    if not mappings:
+                        return
                     
-                    # If we have a mapping and it's the first message (with content)
-                    if bale_ids and first_message:
+                    # Process each chat mapping separately
+                    for chat_id, lang, bale_ids, is_album, first_message in mappings:
+                        # Only the first message of an album has caption
+                        if is_album and not first_message:
+                            continue
+                            
                         # Determine if this is a text message (no media)
                         is_text = not msg.media
                         
                         # For albums, edit the first Bale message (caption)
                         if is_album:
-                            await edit_bale_message(bale_ids[0], caption, is_text=False)
+                            await edit_bale_message(
+                                bale_ids[0], 
+                                caption, 
+                                chat_id, 
+                                lang,
+                                is_text=False
+                            )
                         # For single messages, edit based on type
                         else:
-                            await edit_bale_message(bale_ids[0], caption, is_text=is_text)
+                            await edit_bale_message(
+                                bale_ids[0], 
+                                caption, 
+                                chat_id, 
+                                lang,
+                                is_text=is_text
+                            )
                     return
                 
                 # Handle text message
                 if not msg.media:
                     logger.info(f"📝 Text message: {caption}")
-                    bale_ids = await forward_to_bale("text", caption=caption)
-                    if bale_ids:
-                        store_message_mapping(
-                            msg.id, 
-                            bale_ids, 
-                            is_album=False,
-                            first_message=True
+                    
+                    # Forward to all configured chats
+                    for chat_id, lang in CHAT_CONFIGS:
+                        # Translate if language specified
+                        translated_caption = caption
+                        if lang:
+                            translated_caption = await translate_text(caption, lang)
+                            
+                        bale_ids = await forward_to_bale(
+                            "text", 
+                            caption=translated_caption,
+                            chat_id=chat_id
                         )
+                        if bale_ids:
+                            store_message_mapping(
+                                msg.id, 
+                                chat_id,
+                                bale_ids, 
+                                is_album=False,
+                                first_message=True
+                            )
                 
                 # Handle media messages
                 else:
@@ -422,7 +486,7 @@ async def main():
                             logger.info("⏭️ Part of media group - will process as album")
                             return
                         
-                        # Single photo
+                        # Download media once for all chats
                         media_path = await msg.download_media(
                             file=MEDIA_DIR,
                             progress_callback=lambda current, total: logger.info(
@@ -430,18 +494,29 @@ async def main():
                             )
                         )
                         logger.info(f"✅ Downloaded photo: \033[1;35m{media_path}\033[0m")
-                        bale_ids = await forward_to_bale(
-                            "media_group", 
-                            caption=caption, 
-                            media_group=[{"path": media_path, "type": "photo"}]
-                        )
-                        if bale_ids:
-                            store_message_mapping(
-                                msg.id, 
-                                bale_ids, 
-                                is_album=False,
-                                first_message=True
+                        
+                        # Forward to all configured chats
+                        for chat_id, lang in CHAT_CONFIGS:
+                            # Translate if language specified
+                            translated_caption = caption
+                            if lang:
+                                translated_caption = await translate_text(caption, lang)
+                                
+                            bale_ids = await forward_to_bale(
+                                "media_group", 
+                                caption=translated_caption, 
+                                media_group=[{"path": media_path, "type": "photo"}],
+                                chat_id=chat_id,
+                                lang=lang
                             )
+                            if bale_ids:
+                                store_message_mapping(
+                                    msg.id, 
+                                    chat_id,
+                                    bale_ids, 
+                                    is_album=False,
+                                    first_message=True
+                                )
                     
                     # Handle documents (could be video, audio, voice, etc.)
                     elif isinstance(msg.media, MessageMediaDocument):
@@ -449,7 +524,7 @@ async def main():
                         attributes = msg.media.document.attributes
                         file_name = next((attr.file_name for attr in attributes if hasattr(attr, 'file_name')), None)
                         
-                        # Download the file
+                        # Download the file once for all chats
                         media_path = await msg.download_media(
                             file=MEDIA_DIR,
                             progress_callback=lambda current, total: logger.info(
@@ -473,18 +548,28 @@ async def main():
                         else:
                             logger.warning(f"⚠️ Unsupported document type: {mime_type}")
                         
-                        bale_ids = await forward_to_bale(
-                            "media_group", 
-                            caption=caption, 
-                            media_group=[{"path": media_path, "type": media_type}]
-                        )
-                        if bale_ids:
-                            store_message_mapping(
-                                msg.id, 
-                                bale_ids, 
-                                is_album=False,
-                                first_message=True
+                        # Forward to all configured chats
+                        for chat_id, lang in CHAT_CONFIGS:
+                            # Translate if language specified
+                            translated_caption = caption
+                            if lang:
+                                translated_caption = await translate_text(caption, lang)
+                                
+                            bale_ids = await forward_to_bale(
+                                "media_group", 
+                                caption=translated_caption, 
+                                media_group=[{"path": media_path, "type": media_type}],
+                                chat_id=chat_id,
+                                lang=lang
                             )
+                            if bale_ids:
+                                store_message_mapping(
+                                    msg.id, 
+                                    chat_id,
+                                    bale_ids, 
+                                    is_album=False,
+                                    first_message=True
+                                )
                     else:
                         logger.warning(f"⚠️ Unsupported media type: {type(msg.media).__name__}")
             
@@ -508,12 +593,8 @@ async def main():
                 
                 # Get caption from first message
                 caption = event.messages[0].text or ""
-
-                if TRANSLATE_LANG and caption:
-                    logger.info(f"🌐 Translating album caption to {TRANSLATE_LANG}...")
-                    caption = await translate_text(caption, TRANSLATE_LANG)
                 
-                # Download all media in the group
+                # Download all media in the group once for all chats
                 media_group = []
                 
                 for i, msg in enumerate(event.messages):
@@ -556,18 +637,30 @@ async def main():
                     else:
                         logger.info(f"📝 Album text message: {msg.text}")
                 
-                # Send as a media group
+                # Send to all configured chats
                 if media_group:
-                    bale_ids = await forward_to_bale("media_group", caption=caption, media_group=media_group)
-                    if bale_ids:
-                        # Store mapping for all messages in the album
-                        for i, msg in enumerate(event.messages):
-                            store_message_mapping(
-                                msg.id,
-                                bale_ids,
-                                is_album=True,
-                                first_message=(i == 0)
-                            )  # Only first message has caption
+                    for chat_id, lang in CHAT_CONFIGS:
+                        # Translate caption if needed
+                        translated_caption = caption
+                        if lang:
+                            translated_caption = await translate_text(caption, lang)
+                            
+                        bale_ids = await forward_to_bale(
+                            "media_group", 
+                            caption=translated_caption, 
+                            media_group=media_group,
+                            chat_id=chat_id
+                        )
+                        if bale_ids:
+                            # Store mapping for all messages in the album
+                            for i, msg in enumerate(event.messages):
+                                store_message_mapping(
+                                    msg.id,
+                                    chat_id,
+                                    bale_ids,
+                                    is_album=True,
+                                    first_message=(i == 0)
+                                )  # Only first message has caption
             except Exception as e:
                 logger.error(f"❌ Album processing failed: {str(e)}")
             finally:
@@ -584,15 +677,18 @@ async def main():
         chat = await event.get_chat()
         logger.info(f"🗑️ Deleted message [ID: {msg}] in {chat.title} ({chat.id})")
         
-        bale_ids, is_album, first_message = get_message_mapping(msg)
+        # Get all mappings for this message
+        mappings = get_all_message_mappings(msg)
         
-        if bale_ids:
+        if mappings:
             # Delete all associated Bale messages
-            for bale_id in bale_ids:
-                await delete_bale_message(bale_id)
+            for chat_id, bale_ids, is_album, first_message in mappings:
+                for bale_id in bale_ids:
+                    await delete_bale_message(bale_id, chat_id)
             
-            # Remove from database
-            delete_message_mapping(msg)
+            # Remove all mappings from database
+            delete_all_message_mappings(msg)
+            logger.info(f"🗑️ Deleted {len(mappings)} message mappings")
         else:
             logger.info("ℹ️ No mapping found for deleted message")
 
@@ -622,7 +718,7 @@ async def main():
         logger.info(f"   - {source}")
     
     # Log Bale configuration
-    logger.info(f"🤖 Bale forwarding configured to chat: {BALE_CHAT_ID}")
+    logger.info(f"🤖 Bale forwarding configured to {len(CHAT_CONFIGS)} chats")
     logger.info(f"🔄 Retry configured: 2 hours max, {MAX_RETRY_DELAY}s max delay")
     logger.info(f"💾 Message mapping database: {os.path.abspath(DB_FILE)}")
     
