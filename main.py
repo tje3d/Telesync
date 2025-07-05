@@ -12,6 +12,7 @@ from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 import aiohttp
 import datetime
+from googletrans import Translator
 
 # Load environment variables
 load_dotenv()
@@ -23,6 +24,13 @@ SESSION_STRING = os.getenv('SESSION_STRING', '')
 SOURCES = os.getenv('SOURCES')
 BALE_TOKEN = os.getenv('BALE_TOKEN')
 BALE_CHAT_ID = os.getenv('BALE_CHAT_ID')
+
+# Parse translation language from BALE_CHAT_ID if specified
+TRANSLATE_LANG = None
+if BALE_CHAT_ID and ':' in BALE_CHAT_ID:
+    chat_id_parts = BALE_CHAT_ID.split(':', 1)
+    BALE_CHAT_ID = chat_id_parts[0]
+    TRANSLATE_LANG = chat_id_parts[1].lower()
 
 # Validate configuration
 required_vars = [API_ID, API_HASH, SOURCES, BALE_TOKEN, BALE_CHAT_ID]
@@ -40,6 +48,12 @@ logging.basicConfig(
 
 # Create logger instance
 logger = logging.getLogger(__name__)
+
+# Log translation status
+if TRANSLATE_LANG:
+    logger.info(f"🌐 Translation enabled to: {TRANSLATE_LANG}")
+else:
+    logger.info("🌐 No translation specified")
 
 # Create media directory if not exists
 MEDIA_DIR = "media"
@@ -86,6 +100,19 @@ async def create_session():
         logger.info(f"\033[1;33mSESSION_STRING = '{session_str}'\033[0m")
         logger.info("Add this to your .env file and restart")
         return session_str
+
+async def translate_text(text, dest_lang):
+    """Translate text using Google Translate (without API key)"""
+    if not text or not dest_lang:
+        return text
+        
+    try:
+        translator = Translator()
+        translation = translator.translate(text, dest=dest_lang)
+        return translation.text
+    except Exception as e:
+        logger.error(f"❌ Translation failed: {str(e)}")
+        return text  # Return original text on failure
 
 async def send_with_retry(session, url, payload=None, files=None):
     """Send request with retry mechanism for server errors and network issues"""
@@ -263,6 +290,10 @@ async def edit_bale_message(bale_id, new_content, is_text=False):
     """Edit an existing Bale message text or caption"""
     try:
         async with aiohttp.ClientSession() as session:
+            if TRANSLATE_LANG and new_content:
+                logger.info(f"🌐 Translating edit to {TRANSLATE_LANG}...")
+                new_content = await translate_text(new_content, TRANSLATE_LANG)
+
             # Choose appropriate endpoint based on message type
             if is_text:
                 url = BALE_EDIT_TEXT_URL
@@ -347,6 +378,10 @@ async def main():
             
             # Prepare caption (text content)
             caption = msg.text or ""
+
+            if TRANSLATE_LANG and caption:
+                logger.info(f"🌐 Translating to {TRANSLATE_LANG}...")
+                caption = await translate_text(caption, TRANSLATE_LANG)
             
             try:
                 # Handle edit scenario
@@ -473,6 +508,10 @@ async def main():
                 
                 # Get caption from first message
                 caption = event.messages[0].text or ""
+
+                if TRANSLATE_LANG and caption:
+                    logger.info(f"🌐 Translating album caption to {TRANSLATE_LANG}...")
+                    caption = await translate_text(caption, TRANSLATE_LANG)
                 
                 # Download all media in the group
                 media_group = []
