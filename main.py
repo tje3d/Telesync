@@ -6,8 +6,9 @@ import random
 import time
 import json
 import sqlite3
+import hashlib
 from dotenv import load_dotenv
-from telethon import TelegramClient, events
+from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 import aiohttp
@@ -24,6 +25,8 @@ SESSION_STRING = os.getenv('SESSION_STRING', '')
 SOURCES = os.getenv('SOURCES')
 BALE_TOKEN = os.getenv('BALE_TOKEN')
 BALE_CHAT_IDS = os.getenv('BALE_CHAT_IDS')
+POLL_INTERVAL = int(os.getenv('POLL_INTERVAL', '5'))  # Default 5 seconds
+EDIT_DELETE_CHECK_INTERVAL = int(os.getenv('EDIT_DELETE_CHECK_INTERVAL', '30'))  # Default 30 seconds
 
 # Parse multiple Bale chat IDs with optional translation languages
 CHAT_CONFIGS = []
@@ -80,7 +83,27 @@ def init_db():
                   bale_ids TEXT,
                   is_album BOOLEAN,
                   first_message BOOLEAN,
+                  content_hash TEXT,
+                  last_check TIMESTAMP,
+                  chat_id INTEGER,
                   PRIMARY KEY (telegram_id, bale_chat_id))''')
+    
+    # Add new columns to existing tables if they don't exist
+    try:
+        c.execute('ALTER TABLE messages ADD COLUMN content_hash TEXT')
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    
+    try:
+        c.execute('ALTER TABLE messages ADD COLUMN last_check TIMESTAMP')
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+        
+    try:
+        c.execute('ALTER TABLE messages ADD COLUMN chat_id INTEGER')
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    
     conn.commit()
     conn.close()
 
@@ -187,15 +210,22 @@ async def clean_old_media():
     
     logger.info(f"✅ Old media cleanup finished. Deleted {deleted_count} files.")
 
-def store_message_mapping(telegram_id, bale_chat_id, bale_ids, is_album=False, first_message=False):
+def generate_content_hash(message):
+    """Generate a hash of message content for change detection"""
+    content = f"{message.text or ''}{message.media.__class__.__name__ if message.media else ''}"
+    return hashlib.md5(content.encode()).hexdigest()
+
+def store_message_mapping(telegram_id, bale_chat_id, bale_ids, is_album=False, first_message=False, 
+                         content_hash=None, chat_id=None):
     """Store message mapping in database"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     bale_ids_json = json.dumps(bale_ids)
+    current_time = datetime.datetime.now().isoformat()
     c.execute('''INSERT OR REPLACE INTO messages 
-                 (telegram_id, bale_chat_id, bale_ids, is_album, first_message) 
-                 VALUES (?, ?, ?, ?, ?)''',
-              (telegram_id, bale_chat_id, bale_ids_json, is_album, first_message))
+                 (telegram_id, bale_chat_id, bale_ids, is_album, first_message, content_hash, last_check, chat_id) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+              (telegram_id, bale_chat_id, bale_ids_json, is_album, first_message, content_hash, current_time, chat_id))
     conn.commit()
     conn.close()
 
@@ -399,7 +429,11 @@ async def main():
     # Track album processing to prevent duplicate handling
     active_albums = set()
     
-    async def process_message(event, is_edit=False):
+    # Long polling configuration
+    last_message_ids = {}  # Track last seen message ID for each chat
+    processed_messages = set()  # Track processed messages to avoid duplicates
+    
+    async def process_message(event):
         """Process a single message with locking mechanism"""
         async with processing_lock:
             msg = event.message
@@ -409,48 +443,12 @@ async def main():
                 return
                 
             chat = await event.get_chat()
-            action = "Edited" if is_edit else "New"
-            logger.info(f"📩 {action} message [ID: {msg.id}] in {chat.title} ({chat.id})")
+            logger.info(f"📩 New message [ID: {msg.id}] in {chat.title} ({chat.id})")
             
             # Prepare caption (text content)
             caption = msg.text or ""
             
             try:
-                # Handle edit scenario
-                if is_edit:
-                    # Get all mappings for this message
-                    mappings = get_all_message_mappings(msg.id)
-                    if not mappings:
-                        return
-                    
-                    # Process each chat mapping separately
-                    for chat_id, lang, bale_ids, is_album, first_message in mappings:
-                        # Only the first message of an album has caption
-                        if is_album and not first_message:
-                            continue
-                            
-                        # Determine if this is a text message (no media)
-                        is_text = not msg.media
-                        
-                        # For albums, edit the first Bale message (caption)
-                        if is_album:
-                            await edit_bale_message(
-                                bale_ids[0], 
-                                caption, 
-                                chat_id, 
-                                lang,
-                                is_text=False
-                            )
-                        # For single messages, edit based on type
-                        else:
-                            await edit_bale_message(
-                                bale_ids[0], 
-                                caption, 
-                                chat_id, 
-                                lang,
-                                is_text=is_text
-                            )
-                    return
                 
                 # Handle text message
                 if not msg.media:
@@ -469,12 +467,15 @@ async def main():
                             chat_id=chat_id
                         )
                         if bale_ids:
+                            content_hash = generate_content_hash(msg)
                             store_message_mapping(
                                 msg.id, 
                                 chat_id,
                                 bale_ids, 
                                 is_album=False,
-                                first_message=True
+                                first_message=True,
+                                content_hash=content_hash,
+                                chat_id=chat.id
                             )
                 
                 # Handle media messages
@@ -510,12 +511,15 @@ async def main():
                                 lang=lang
                             )
                             if bale_ids:
+                                content_hash = generate_content_hash(msg)
                                 store_message_mapping(
                                     msg.id, 
                                     chat_id,
                                     bale_ids, 
                                     is_album=False,
-                                    first_message=True
+                                    first_message=True,
+                                    content_hash=content_hash,
+                                    chat_id=chat.id
                                 )
                     
                     # Handle documents (could be video, audio, voice, etc.)
@@ -563,12 +567,15 @@ async def main():
                                 lang=lang
                             )
                             if bale_ids:
+                                content_hash = generate_content_hash(msg)
                                 store_message_mapping(
                                     msg.id, 
                                     chat_id,
                                     bale_ids, 
                                     is_album=False,
-                                    first_message=True
+                                    first_message=True,
+                                    content_hash=content_hash,
+                                    chat_id=chat.id
                                 )
                     else:
                         logger.warning(f"⚠️ Unsupported media type: {type(msg.media).__name__}")
@@ -654,12 +661,15 @@ async def main():
                         if bale_ids:
                             # Store mapping for all messages in the album
                             for i, msg in enumerate(event.messages):
+                                content_hash = generate_content_hash(msg)
                                 store_message_mapping(
                                     msg.id,
                                     chat_id,
                                     bale_ids,
                                     is_album=True,
-                                    first_message=(i == 0)
+                                    first_message=(i == 0),
+                                    content_hash=content_hash,
+                                    chat_id=chat.id
                                 )  # Only first message has caption
             except Exception as e:
                 logger.error(f"❌ Album processing failed: {str(e)}")
@@ -667,62 +677,251 @@ async def main():
                 # Remove album from active processing
                 active_albums.discard(album_id)
 
-    async def handle_edit(event):
-        """Handle message edit events"""
-        await process_message(event, is_edit=True)
-
-    async def handle_delete(event):
-        """Handle message delete events"""
-        msg = event.deleted_id
-        chat = await event.get_chat()
-        logger.info(f"🗑️ Deleted message [ID: {msg}] in {chat.title} ({chat.id})")
+    async def check_for_edits_and_deletes():
+        """Periodically check for message edits and deletions"""
+        logger.info(f"🔍 Starting edit/delete checker with {EDIT_DELETE_CHECK_INTERVAL}s interval...")
         
-        # Get all mappings for this message
-        mappings = get_all_message_mappings(msg)
+        while True:
+            try:
+                await asyncio.sleep(EDIT_DELETE_CHECK_INTERVAL)
+                
+                for source in sources_list:
+                    try:
+                        chat = await client.get_entity(source)
+                        chat_id = chat.id
+                        
+                        # Get recent messages to check for edits
+                        messages = await client.get_messages(chat, limit=5)
+                        current_messages = {msg.id: msg for msg in messages}
+                        
+                        # Get stored message mappings for this chat
+                        conn = sqlite3.connect(DB_FILE)
+                        c = conn.cursor()
+                        c.execute('''SELECT telegram_id, bale_chat_id, bale_ids, content_hash, is_album, first_message 
+                                     FROM messages WHERE chat_id = ?''', (chat_id,))
+                        stored_messages = c.fetchall()
+                        conn.close()
+                        
+                        # Check for edits
+                        for telegram_id, bale_chat_id, bale_ids_json, stored_hash, is_album, first_message in stored_messages:
+                            if telegram_id in current_messages:
+                                current_msg = current_messages[telegram_id]
+                                current_hash = generate_content_hash(current_msg)
+                                
+                                # Check if content changed
+                                if stored_hash and current_hash != stored_hash:
+                                    logger.info(f"✏️ Detected edit in message {telegram_id}")
+                                    
+                                    # Update Bale message
+                                    bale_ids = json.loads(bale_ids_json)
+                                    caption = current_msg.text or ""
+                                    
+                                    # Find the corresponding chat config
+                                    for chat_config_id, lang in CHAT_CONFIGS:
+                                        if chat_config_id == bale_chat_id:
+                                            # Only edit if this is the first message of an album or a single message
+                                            if not is_album or first_message:
+                                                # Translate if needed
+                                                if lang:
+                                                    caption = await translate_text(caption, lang)
+                                                
+                                                # Determine if text-only message
+                                                is_text = not current_msg.media
+                                                
+                                                await edit_bale_message(
+                                                    bale_ids[0], 
+                                                    caption, 
+                                                    bale_chat_id, 
+                                                    lang,
+                                                    is_text=is_text
+                                                )
+                                            break
+                                    
+                                    # Update stored hash
+                                    conn = sqlite3.connect(DB_FILE)
+                                    c = conn.cursor()
+                                    c.execute('''UPDATE messages SET content_hash = ?, last_check = ? 
+                                                 WHERE telegram_id = ? AND bale_chat_id = ?''',
+                                              (current_hash, datetime.datetime.now().isoformat(), telegram_id, bale_chat_id))
+                                    conn.commit()
+                                    conn.close()
+                            
+                            else:
+                                # Message not found - it was deleted
+                                logger.info(f"🗑️ Detected deletion of message {telegram_id}")
+                                
+                                # Delete from Bale
+                                bale_ids = json.loads(bale_ids_json)
+                                for bale_id in bale_ids:
+                                    await delete_bale_message(bale_id, bale_chat_id)
+                                
+                                # Remove from database
+                                conn = sqlite3.connect(DB_FILE)
+                                c = conn.cursor()
+                                c.execute('''DELETE FROM messages WHERE telegram_id = ? AND bale_chat_id = ?''',
+                                          (telegram_id, bale_chat_id))
+                                conn.commit()
+                                conn.close()
+                        
+                    except Exception as e:
+                        logger.error(f"❌ Error checking edits/deletes for {source}: {str(e)}")
+                        continue
+                        
+            except Exception as e:
+                logger.error(f"❌ Edit/delete check error: {str(e)}")
+                await asyncio.sleep(EDIT_DELETE_CHECK_INTERVAL)
+
+    async def poll_for_messages():
+        """Long polling function to check for new messages"""
+        logger.info(f"🔄 Starting long polling with {POLL_INTERVAL}s interval...")
         
-        if mappings:
-            # Delete all associated Bale messages
-            for chat_id, bale_ids, is_album, first_message in mappings:
-                for bale_id in bale_ids:
-                    await delete_bale_message(bale_id, chat_id)
-            
-            # Remove all mappings from database
-            delete_all_message_mappings(msg)
-            logger.info(f"🗑️ Deleted {len(mappings)} message mappings")
-        else:
-            logger.info("ℹ️ No mapping found for deleted message")
+        # Initialize last message IDs for all chats
+        for source in sources_list:
+            try:
+                chat = await client.get_entity(source)
+                # Get the most recent message to start from
+                messages = await client.get_messages(chat, limit=1)
+                if messages:
+                    last_message_ids[chat.id] = messages[0].id
+                    logger.info(f"📍 Starting from message ID {messages[0].id} in {chat.title}")
+                else:
+                    last_message_ids[chat.id] = 0
+            except Exception as e:
+                logger.error(f"❌ Error initializing chat {source}: {str(e)}")
+                last_message_ids[source] = 0
+        
+        poll_count = 0
+        while True:
+            try:
+                poll_count += 1
+                if poll_count % 12 == 1:  # Log every minute (12 * 5s = 60s)
+                    logger.info(f"🔍 Polling cycle #{poll_count}...")
+                
+                for source in sources_list:
+                    try:
+                        # Get the chat entity
+                        chat = await client.get_entity(source)
+                        chat_id = chat.id
+                        
+                        # Get last seen message ID for this chat
+                        last_id = last_message_ids.get(chat_id, 0)
+                        
+                        # Get recent messages (limit to 50 to avoid overwhelming)
+                        messages = await client.get_messages(chat, limit=50)
+                        
+                        # Process new messages in chronological order
+                        new_messages = [msg for msg in reversed(messages) if msg.id > last_id]
+                        
+                        if new_messages:
+                            logger.info(f"📥 Found {len(new_messages)} new messages in {chat.title}")
+                            
+                            # Group messages by grouped_id for album handling
+                            albums = {}
+                            single_messages = []
+                            
+                            for msg in new_messages:
+                                if msg.grouped_id:
+                                    if msg.grouped_id not in albums:
+                                        albums[msg.grouped_id] = []
+                                    albums[msg.grouped_id].append(msg)
+                                else:
+                                    single_messages.append(msg)
+                            
+                            # Process albums
+                            for grouped_id, album_messages in albums.items():
+                                if grouped_id not in processed_messages:
+                                    # Create a mock event object for album processing
+                                    class MockAlbumEvent:
+                                        def __init__(self, messages):
+                                            self.messages = messages
+                                        
+                                        async def get_chat(self):
+                                            return chat
+                                    
+                                    await process_album(MockAlbumEvent(album_messages))
+                                    processed_messages.add(grouped_id)
+                            
+                            # Process single messages
+                            for msg in single_messages:
+                                if msg.id not in processed_messages:
+                                    # Create a mock event object for message processing
+                                    class MockMessageEvent:
+                                        def __init__(self, message):
+                                            self.message = message
+                                        
+                                        async def get_chat(self):
+                                            return chat
+                                    
+                                    await process_message(MockMessageEvent(msg))
+                                    processed_messages.add(msg.id)
+                            
+                            # Update last seen message ID
+                            last_message_ids[chat_id] = max(msg.id for msg in new_messages)
+                            
+                            # Clean up old processed messages to prevent memory growth
+                            if len(processed_messages) > 10000:
+                                # Keep only the most recent 5000 processed messages
+                                recent_ids = sorted(processed_messages)[-5000:]
+                                processed_messages.clear()
+                                processed_messages.update(recent_ids)
+                        
+                    except Exception as e:
+                        logger.error(f"❌ Error polling chat {source}: {str(e)}")
+                        continue
+                
+                # Wait before next poll
+                await asyncio.sleep(POLL_INTERVAL)
+                
+            except KeyboardInterrupt:
+                logger.info("🛑 Received interrupt signal, stopping polling...")
+                break
+            except Exception as e:
+                logger.error(f"❌ Polling error: {str(e)}")
+                await asyncio.sleep(POLL_INTERVAL * 2)  # Wait longer on error
 
-    # Register handlers
-    @client.on(events.Album(chats=sources_list))
-    async def album_handler(event):
-        await process_album(event)
-    
-    @client.on(events.NewMessage(chats=sources_list))
-    async def message_handler(event):
-        # Skip if part of an album (handled separately)
-        if event.message.grouped_id:
-            return
-        await process_message(event)
-    
-    @client.on(events.MessageEdited(chats=sources_list))
-    async def edit_handler(event):
-        await handle_edit(event)
-    
-    @client.on(events.MessageDeleted(chats=sources_list))
-    async def delete_handler(event):
-        await handle_delete(event)
-
-    await client.start()
-    logger.info(f"👀 Monitoring started for {len(sources_list)} sources:")
-    for source in sources_list:
-        logger.info(f"   - {source}")
-    
-    # Log Bale configuration
-    logger.info(f"🤖 Bale forwarding configured to {len(CHAT_CONFIGS)} chats")
-    logger.info(f"🔄 Retry configured: 2 hours max, {MAX_RETRY_DELAY}s max delay")
-    logger.info(f"💾 Message mapping database: {os.path.abspath(DB_FILE)}")
-    
-    await client.run_until_disconnected()
+    try:
+        await client.start()
+        
+        # Initialize last_message_ids for each chat
+        for source in sources_list:
+            try:
+                chat = await client.get_entity(source)
+                async for message in client.iter_messages(chat, limit=1):
+                    last_message_ids[chat.id] = message.id
+                    logger.info(f"Initialized last message ID for {chat.title}: {message.id}")
+                    break
+                else:
+                    last_message_ids[chat.id] = 0
+                    logger.info(f"No messages found in {chat.title}, starting from 0")
+            except Exception as e:
+                logger.error(f"Error initializing chat {source}: {e}")
+                last_message_ids[source] = 0
+        logger.info(f"👀 Long polling started for {len(sources_list)} sources:")
+        for source in sources_list:
+            logger.info(f"   - {source}")
+        
+        # Log Bale configuration
+        logger.info(f"🤖 Bale forwarding configured to {len(CHAT_CONFIGS)} chats")
+        logger.info(f"🔄 Retry configured: 2 hours max, {MAX_RETRY_DELAY}s max delay")
+        logger.info(f"💾 Message mapping database: {os.path.abspath(DB_FILE)}")
+        logger.info(f"⏱️ Polling interval: {POLL_INTERVAL} seconds")
+        logger.info(f"🔍 Edit/delete checks will run every {EDIT_DELETE_CHECK_INTERVAL}s")
+        
+        logger.info(f"Starting long polling with {POLL_INTERVAL}s interval...")
+        
+        # Start both polling tasks concurrently
+        await asyncio.gather(
+            poll_for_messages(),
+            check_for_edits_and_deletes()
+        )
+        
+    except KeyboardInterrupt:
+        logger.info("Received interrupt signal, shutting down gracefully...")
+    except Exception as e:
+        logger.error(f"Unexpected error in main loop: {e}")
+    finally:
+        await client.disconnect()
+        logger.info("Client disconnected")
 
 if __name__ == '__main__':
     if not SESSION_STRING:
