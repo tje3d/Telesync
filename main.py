@@ -3,14 +3,17 @@ import asyncio
 import os
 import sys
 import json
-import sqlite3
-import hashlib
 from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 import datetime
 from bale import forward_to_bale, edit_bale_message, delete_bale_message, translate_text, MAX_RETRY_DELAY
+from database import (
+    init_db, generate_content_hash, store_message_mapping, get_message_mapping,
+    get_all_message_mappings, delete_message_mapping, delete_all_message_mappings,
+    get_recent_message_mappings, update_message_hash, get_database_path
+)
 
 # Load environment variables
 load_dotenv()
@@ -68,42 +71,7 @@ MEDIA_DIR = "media"
 os.makedirs(MEDIA_DIR, exist_ok=True)
 logger.info(f"📁 Media storage: {os.path.abspath(MEDIA_DIR)}")
 
-# Database setup
-DB_FILE = "message_mappings.db"
-
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS messages
-                 (telegram_id INTEGER,
-                  bale_chat_id TEXT,
-                  bale_ids TEXT,
-                  is_album BOOLEAN,
-                  first_message BOOLEAN,
-                  content_hash TEXT,
-                  last_check TIMESTAMP,
-                  chat_id INTEGER,
-                  PRIMARY KEY (telegram_id, bale_chat_id))''')
-    
-    # Add new columns to existing tables if they don't exist
-    try:
-        c.execute('ALTER TABLE messages ADD COLUMN content_hash TEXT')
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-    
-    try:
-        c.execute('ALTER TABLE messages ADD COLUMN last_check TIMESTAMP')
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-        
-    try:
-        c.execute('ALTER TABLE messages ADD COLUMN chat_id INTEGER')
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-    
-    conn.commit()
-    conn.close()
-
+# Initialize database
 init_db()
 
 
@@ -145,72 +113,6 @@ async def clean_old_media():
                 logger.error(f"❌ Error deleting file {filename}: {e}")
     
     logger.info(f"✅ Old media cleanup finished. Deleted {deleted_count} files.")
-
-def generate_content_hash(message):
-    """Generate a hash of message content for change detection"""
-    content = f"{message.text or ''}{message.media.__class__.__name__ if message.media else ''}"
-    return hashlib.md5(content.encode()).hexdigest()
-
-def store_message_mapping(telegram_id, bale_chat_id, bale_ids, is_album=False, first_message=False, 
-                         content_hash=None, chat_id=None):
-    """Store message mapping in database"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    bale_ids_json = json.dumps(bale_ids)
-    current_time = datetime.datetime.now().isoformat()
-    c.execute('''INSERT OR REPLACE INTO messages 
-                 (telegram_id, bale_chat_id, bale_ids, is_album, first_message, content_hash, last_check, chat_id) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-              (telegram_id, bale_chat_id, bale_ids_json, is_album, first_message, content_hash, current_time, chat_id))
-    conn.commit()
-    conn.close()
-
-def get_message_mapping(telegram_id, bale_chat_id):
-    """Get message mapping from database for specific chat"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''SELECT bale_ids, is_album, first_message 
-                 FROM messages WHERE telegram_id = ? AND bale_chat_id = ?''', 
-              (telegram_id, bale_chat_id))
-    row = c.fetchone()
-    conn.close()
-    
-    if row:
-        bale_ids = json.loads(row[0])
-        return bale_ids, row[1], row[2]
-    return None, None, None
-
-def get_all_message_mappings(telegram_id):
-    """Get all message mappings for a Telegram message ID"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''SELECT bale_chat_id, bale_ids, is_album, first_message 
-                 FROM messages WHERE telegram_id = ?''', (telegram_id,))
-    rows = c.fetchall()
-    conn.close()
-    
-    results = []
-    for row in rows:
-        bale_ids = json.loads(row[1])
-        results.append((row[0], bale_ids, row[2], row[3]))
-    return results
-
-def delete_message_mapping(telegram_id, bale_chat_id):
-    """Delete specific message mapping from database"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''DELETE FROM messages WHERE telegram_id = ? AND bale_chat_id = ?''', 
-              (telegram_id, bale_chat_id))
-    conn.commit()
-    conn.close()
-
-def delete_all_message_mappings(telegram_id):
-    """Delete all mappings for a Telegram message ID"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''DELETE FROM messages WHERE telegram_id = ?''', (telegram_id,))
-    conn.commit()
-    conn.close()
 
 
 
@@ -524,14 +426,7 @@ async def main():
                         current_messages = {msg.id: msg for msg in messages}
                         
                         # Get stored message mappings for this chat that are less than 1 minute old
-                        one_minute_ago = datetime.datetime.now() - datetime.timedelta(minutes=1)
-                        conn = sqlite3.connect(DB_FILE)
-                        c = conn.cursor()
-                        c.execute('''SELECT telegram_id, bale_chat_id, bale_ids, content_hash, is_album, first_message 
-                                     FROM messages WHERE chat_id = ? AND last_check > ?''', 
-                                  (chat_id, one_minute_ago.isoformat()))
-                        stored_messages = c.fetchall()
-                        conn.close()
+                        stored_messages = get_recent_message_mappings(chat_id, minutes_ago=1)
                         
                         # Check for edits
                         for telegram_id, bale_chat_id, bale_ids_json, stored_hash, is_album, first_message in stored_messages:
@@ -570,13 +465,7 @@ async def main():
                                             break
                                     
                                     # Update stored hash
-                                    conn = sqlite3.connect(DB_FILE)
-                                    c = conn.cursor()
-                                    c.execute('''UPDATE messages SET content_hash = ?, last_check = ? 
-                                                 WHERE telegram_id = ? AND bale_chat_id = ?''',
-                                              (current_hash, datetime.datetime.now().isoformat(), telegram_id, bale_chat_id))
-                                    conn.commit()
-                                    conn.close()
+                                    update_message_hash(telegram_id, bale_chat_id, current_hash)
                             
                             else:
                                 # Message not found - it was deleted
@@ -588,12 +477,7 @@ async def main():
                                     await delete_bale_message(bale_id, bale_chat_id, BALE_TOKEN)
                                 
                                 # Remove from database
-                                conn = sqlite3.connect(DB_FILE)
-                                c = conn.cursor()
-                                c.execute('''DELETE FROM messages WHERE telegram_id = ? AND bale_chat_id = ?''',
-                                          (telegram_id, bale_chat_id))
-                                conn.commit()
-                                conn.close()
+                                delete_message_mapping(telegram_id, bale_chat_id)
                         
                     except Exception as e:
                         logger.error(f"❌ Error checking edits/deletes for {source}: {str(e)}")
@@ -735,7 +619,7 @@ async def main():
         # Log Bale configuration
         logger.info(f"🤖 Bale forwarding configured to {len(CHAT_CONFIGS)} chats")
         logger.info(f"🔄 Retry configured: 2 hours max, {MAX_RETRY_DELAY}s max delay")
-        logger.info(f"💾 Message mapping database: {os.path.abspath(DB_FILE)}")
+        logger.info(f"💾 Message mapping database: {get_database_path()}")
         logger.info(f"⏱️ Polling interval: {POLL_INTERVAL} seconds")
         logger.info(f"🔍 Edit/delete checks will run every {EDIT_DELETE_CHECK_INTERVAL}s")
         
