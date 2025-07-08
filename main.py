@@ -520,14 +520,16 @@ async def main():
                         chat_id = chat.id
                         
                         # Get recent messages to check for edits
-                        messages = await client.get_messages(chat, limit=5)
+                        messages = await client.get_messages(chat, limit=20)
                         current_messages = {msg.id: msg for msg in messages}
                         
-                        # Get stored message mappings for this chat
+                        # Get stored message mappings for this chat that are less than 3 minutes old
+                        fifteen_minutes_ago = datetime.datetime.now() - datetime.timedelta(minutes=3)
                         conn = sqlite3.connect(DB_FILE)
                         c = conn.cursor()
                         c.execute('''SELECT telegram_id, bale_chat_id, bale_ids, content_hash, is_album, first_message 
-                                     FROM messages WHERE chat_id = ?''', (chat_id,))
+                                     FROM messages WHERE chat_id = ? AND last_check > ?''', 
+                                  (chat_id, fifteen_minutes_ago.isoformat()))
                         stored_messages = c.fetchall()
                         conn.close()
                         
