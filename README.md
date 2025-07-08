@@ -4,15 +4,16 @@
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Docker](https://img.shields.io/badge/Docker-Ready-blue.svg)](Dockerfile)
 
-A powerful, feature-rich Telegram to Bale Messenger forwarding bot with real-time synchronization, automatic translation, and intelligent media handling.
+A powerful, feature-rich Telegram forwarding bot with real-time synchronization to Bale Messenger and Eitaa, featuring automatic translation and intelligent media handling.
 
 ## ✨ Features
 
 ### 🔄 **Real-time Message Forwarding**
 
-- Instant forwarding from Telegram channels/groups to Bale Messenger
+- Instant forwarding from Telegram channels/groups to Bale Messenger and Eitaa
 - Support for multiple source channels and destination chats
 - Configurable polling intervals for optimal performance
+- Dual platform support: Forward to both Bale and Eitaa simultaneously
 
 ### 🌍 **Multi-language Support**
 
@@ -56,7 +57,10 @@ A powerful, feature-rich Telegram to Bale Messenger forwarding bot with real-tim
 
 - Python 3.9 or higher
 - Telegram API credentials ([Get them here](https://my.telegram.org/apps))
-- Bale Bot token ([Create a bot](https://ble.ir/newbot))
+- Bale Bot token ([Create a bot](https://ble.ir/newbot)) - Optional
+- Eitaa Bot token ([Get from eitaayar.ir](https://eitaayar.ir)) - Optional
+
+**Note**: You need at least one messaging platform (Bale or Eitaa) configured.
 
 ### Installation
 
@@ -109,9 +113,13 @@ API_HASH=your_api_hash_here
 SESSION_STRING=your_session_string_here
 SOURCES=@channel1,@channel2,@group1
 
-# Bale Messenger Configuration
+# Bale Messenger Configuration (Optional)
 BALE_TOKEN=your_bale_bot_token
 BALE_CHAT_IDS=chat_id1,chat_id2:en,chat_id3:fa
+
+# Eitaa Messenger Configuration (Optional)
+EITAA_TOKEN=your_eitaa_bot_token
+EITAA_CHAT_IDS=chat_id1,chat_id2:en,chat_id3:fa
 
 # Performance Tuning
 POLL_INTERVAL=5                    # Polling frequency (seconds)
@@ -120,13 +128,23 @@ EDIT_DELETE_CHECK_INTERVAL=30      # Edit/delete check frequency (seconds)
 
 ### Chat Configuration
 
-The `BALE_CHAT_IDS` supports per-chat language settings:
+Both `BALE_CHAT_IDS` and `EITAA_CHAT_IDS` support per-chat language settings:
 
 - `chat_id1` - No translation (original language)
 - `chat_id2:en` - Translate to English
 - `chat_id3:fa` - Translate to Persian/Farsi
 
 **Supported Languages**: Any language code supported by Google Translate (en, fa, ar, fr, de, es, etc.)
+
+### Platform Differences
+
+| Feature | Bale | Eitaa |
+|---------|------|-------|
+| Message Editing | ✅ Supported | ❌ Not supported |
+| Message Deletion | ✅ Supported | ❌ Not supported |
+| Media Groups | ✅ Supported | ❌ Sends individually |
+| File Types | All types | All types |
+| Translation | ✅ Supported | ✅ Supported |
 
 ### Source Configuration
 
@@ -253,6 +271,20 @@ If you encounter any issues or have questions:
 - [aiohttp](https://github.com/aio-libs/aiohttp) - Async HTTP client/server
 - [Google Translate](https://github.com/ssut/py-googletrans) - Translation service
 - [Bale Messenger](https://bale.ai) - Iranian messaging platform
+- [Eitaa Messenger](https://eitaa.com) - Iranian messaging platform
+
+## 📚 API Documentation
+
+### Eitaa API
+
+The Eitaa integration is based on the official Eitaayar API. Key features:
+
+- **Base URL**: `https://eitaayar.ir/api/{TOKEN}/{METHOD}`
+- **Supported Methods**: `getMe`, `sendMessage`, `sendFile`
+- **File Support**: All media types via `sendFile` method
+- **Limitations**: No message editing, deletion, or media groups
+
+For complete API documentation, see [doc/eitaa.md](doc/eitaa.md).
 
 ---
 

@@ -10,6 +10,7 @@ from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 
 from bale import forward_to_bale, edit_bale_message, delete_bale_message, translate_text, MAX_RETRY_DELAY
+from eitaa import forward_to_eitaa, edit_eitaa_message, delete_eitaa_message, get_eitaa_me
 from database import (
     init_db, generate_content_hash, store_message_mapping, get_message_mapping,
     get_all_message_mappings, delete_message_mapping, delete_all_message_mappings,
@@ -27,11 +28,13 @@ SESSION_STRING = os.getenv('SESSION_STRING', '')
 SOURCES = os.getenv('SOURCES')
 BALE_TOKEN = os.getenv('BALE_TOKEN')
 BALE_CHAT_IDS = os.getenv('BALE_CHAT_IDS')
+EITAA_TOKEN = os.getenv('EITAA_TOKEN')
+EITAA_CHAT_IDS = os.getenv('EITAA_CHAT_IDS')
 POLL_INTERVAL = int(os.getenv('POLL_INTERVAL', '5'))  # Default 5 seconds
 EDIT_DELETE_CHECK_INTERVAL = int(os.getenv('EDIT_DELETE_CHECK_INTERVAL', '30'))  # Default 30 seconds
 
 # Parse multiple Bale chat IDs with optional translation languages
-CHAT_CONFIGS = []
+BALE_CHAT_CONFIGS = []
 if BALE_CHAT_IDS:
     for item in BALE_CHAT_IDS.split(','):
         item = item.strip()
@@ -39,15 +42,34 @@ if BALE_CHAT_IDS:
             parts = item.split(':', 1)
             chat_id = parts[0].strip()
             lang = parts[1].strip().lower()
-            CHAT_CONFIGS.append((chat_id, lang))
+            BALE_CHAT_CONFIGS.append((chat_id, lang))
         else:
-            CHAT_CONFIGS.append((item, None))
+            BALE_CHAT_CONFIGS.append((item, None))
+
+# Parse multiple Eitaa chat IDs with optional translation languages
+EITAA_CHAT_CONFIGS = []
+if EITAA_CHAT_IDS:
+    for item in EITAA_CHAT_IDS.split(','):
+        item = item.strip()
+        if ':' in item:
+            parts = item.split(':', 1)
+            chat_id = parts[0].strip()
+            lang = parts[1].strip().lower()
+            EITAA_CHAT_CONFIGS.append((chat_id, lang))
+        else:
+            EITAA_CHAT_CONFIGS.append((item, None))
 
 # Validate configuration
-required_vars = [API_ID, API_HASH, SOURCES, BALE_TOKEN, CHAT_CONFIGS]
+required_vars = [API_ID, API_HASH, SOURCES]
 if not all(required_vars):
     print("❌ Missing required environment variables in .env file!")
     print("Please ensure all required variables are set")
+    exit(1)
+
+# Check if at least one messaging platform is configured
+if not (BALE_TOKEN and BALE_CHAT_CONFIGS) and not (EITAA_TOKEN and EITAA_CHAT_CONFIGS):
+    print("❌ No messaging platform configured!")
+    print("Please configure either Bale (BALE_TOKEN + BALE_CHAT_IDS) or Eitaa (EITAA_TOKEN + EITAA_CHAT_IDS) or both")
     exit(1)
 
 # Setup colorful console logging
@@ -61,12 +83,21 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Log chat configurations
-logger.info(f"🤖 Forwarding to {len(CHAT_CONFIGS)} Bale chats:")
-for chat_id, lang in CHAT_CONFIGS:
-    if lang:
-        logger.info(f"   - Chat ID: {chat_id} (Translation to: {lang})")
-    else:
-        logger.info(f"   - Chat ID: {chat_id} (No translation)")
+if BALE_CHAT_CONFIGS:
+    logger.info(f"🤖 Forwarding to {len(BALE_CHAT_CONFIGS)} Bale chats:")
+    for chat_id, lang in BALE_CHAT_CONFIGS:
+        if lang:
+            logger.info(f"   - Bale Chat ID: {chat_id} (Translation to: {lang})")
+        else:
+            logger.info(f"   - Bale Chat ID: {chat_id} (No translation)")
+
+if EITAA_CHAT_CONFIGS:
+    logger.info(f"📱 Forwarding to {len(EITAA_CHAT_CONFIGS)} Eitaa chats:")
+    for chat_id, lang in EITAA_CHAT_CONFIGS:
+        if lang:
+            logger.info(f"   - Eitaa Chat ID: {chat_id} (Translation to: {lang})")
+        else:
+            logger.info(f"   - Eitaa Chat ID: {chat_id} (No translation)")
 
 # Initialize media directory and database
 init_media_dir()
@@ -133,30 +164,57 @@ async def main():
                 if not msg.media:
                     logger.info(f"📝 Text message: {caption}")
                     
-                    # Forward to all configured chats
-                    for chat_id, lang in CHAT_CONFIGS:
-                        # Translate if language specified
-                        translated_caption = caption
-                        if lang:
-                            translated_caption = await translate_text(caption, lang)
-                            
-                        bale_ids = await forward_to_bale(
-                            "text", 
-                            BALE_TOKEN,
-                            caption=translated_caption,
-                            chat_id=chat_id
-                        )
-                        if bale_ids:
-                            content_hash = generate_content_hash(msg)
-                            store_message_mapping(
-                                msg.id, 
-                                chat_id,
-                                bale_ids, 
-                                is_album=False,
-                                first_message=True,
-                                content_hash=content_hash,
-                                chat_id=chat.id
+                    # Forward to all configured Bale chats
+                    if BALE_TOKEN and BALE_CHAT_CONFIGS:
+                        for chat_id, lang in BALE_CHAT_CONFIGS:
+                            # Translate if language specified
+                            translated_caption = caption
+                            if lang:
+                                translated_caption = await translate_text(caption, lang)
+                                
+                            bale_ids = await forward_to_bale(
+                                "text", 
+                                BALE_TOKEN,
+                                caption=translated_caption,
+                                chat_id=chat_id
                             )
+                            if bale_ids:
+                                content_hash = generate_content_hash(msg)
+                                store_message_mapping(
+                                    msg.id, 
+                                    f"bale_{chat_id}",
+                                    bale_ids, 
+                                    is_album=False,
+                                    first_message=True,
+                                    content_hash=content_hash,
+                                    chat_id=chat.id
+                                )
+                    
+                    # Forward to all configured Eitaa chats
+                    if EITAA_TOKEN and EITAA_CHAT_CONFIGS:
+                        for chat_id, lang in EITAA_CHAT_CONFIGS:
+                            # Translate if language specified
+                            translated_caption = caption
+                            if lang:
+                                translated_caption = await translate_text(caption, lang)
+                                
+                            eitaa_ids = await forward_to_eitaa(
+                                "text", 
+                                EITAA_TOKEN,
+                                caption=translated_caption,
+                                chat_id=chat_id
+                            )
+                            if eitaa_ids:
+                                content_hash = generate_content_hash(msg)
+                                store_message_mapping(
+                                    msg.id, 
+                                    f"eitaa_{chat_id}",
+                                    eitaa_ids, 
+                                    is_album=False,
+                                    first_message=True,
+                                    content_hash=content_hash,
+                                    chat_id=chat.id
+                                )
                 
                 # Handle media messages
                 else:
@@ -171,43 +229,73 @@ async def main():
                         media_path = media_info["path"]
                         media_type = media_info["type"]
                         
-                        # Forward to all configured chats
-                        for chat_id, lang in CHAT_CONFIGS:
-                            # Translate if language specified
-                            translated_caption = caption
-                            if lang:
-                                translated_caption = await translate_text(caption, lang)
-                            
-                            # Use specific content type for videos and photos, media_group for others
-                            if media_type in ["video", "photo"]:
-                                bale_ids = await forward_to_bale(
+                        # Forward to all configured Bale chats
+                        if BALE_TOKEN and BALE_CHAT_CONFIGS:
+                            for chat_id, lang in BALE_CHAT_CONFIGS:
+                                # Translate if language specified
+                                translated_caption = caption
+                                if lang:
+                                    translated_caption = await translate_text(caption, lang)
+                                
+                                # Use specific content type for videos and photos, media_group for others
+                                if media_type in ["video", "photo"]:
+                                    bale_ids = await forward_to_bale(
+                                        media_type, 
+                                        BALE_TOKEN,
+                                        caption=translated_caption, 
+                                        media_path=media_path,
+                                        chat_id=chat_id,
+                                        lang=lang
+                                    )
+                                else:
+                                    bale_ids = await forward_to_bale(
+                                        "media_group", 
+                                        BALE_TOKEN,
+                                        caption=translated_caption, 
+                                        media_group=[{"path": media_path, "type": media_type}],
+                                        chat_id=chat_id,
+                                        lang=lang
+                                    )
+                                if bale_ids:
+                                    content_hash = generate_content_hash(msg)
+                                    store_message_mapping(
+                                        msg.id, 
+                                        f"bale_{chat_id}",
+                                        bale_ids, 
+                                        is_album=False,
+                                        first_message=True,
+                                        content_hash=content_hash,
+                                        chat_id=chat.id
+                                    )
+                        
+                        # Forward to all configured Eitaa chats
+                        if EITAA_TOKEN and EITAA_CHAT_CONFIGS:
+                            for chat_id, lang in EITAA_CHAT_CONFIGS:
+                                # Translate if language specified
+                                translated_caption = caption
+                                if lang:
+                                    translated_caption = await translate_text(caption, lang)
+                                
+                                # Eitaa uses sendFile for all media types
+                                eitaa_ids = await forward_to_eitaa(
                                     media_type, 
-                                    BALE_TOKEN,
+                                    EITAA_TOKEN,
                                     caption=translated_caption, 
                                     media_path=media_path,
                                     chat_id=chat_id,
                                     lang=lang
                                 )
-                            else:
-                                bale_ids = await forward_to_bale(
-                                    "media_group", 
-                                    BALE_TOKEN,
-                                    caption=translated_caption, 
-                                    media_group=[{"path": media_path, "type": media_type}],
-                                    chat_id=chat_id,
-                                    lang=lang
-                                )
-                            if bale_ids:
-                                content_hash = generate_content_hash(msg)
-                                store_message_mapping(
-                                    msg.id, 
-                                    chat_id,
-                                    bale_ids, 
-                                    is_album=False,
-                                    first_message=True,
-                                    content_hash=content_hash,
-                                    chat_id=chat.id
-                                )
+                                if eitaa_ids:
+                                    content_hash = generate_content_hash(msg)
+                                    store_message_mapping(
+                                        msg.id, 
+                                        f"eitaa_{chat_id}",
+                                        eitaa_ids, 
+                                        is_album=False,
+                                        first_message=True,
+                                        content_hash=content_hash,
+                                        chat_id=chat.id
+                                    )
             
             except Exception as e:
                 logger.error(f"❌ Processing failed: {str(e)}")
@@ -235,32 +323,63 @@ async def main():
                 
                 # Send to all configured chats
                 if media_group:
-                    for chat_id, lang in CHAT_CONFIGS:
-                        # Translate caption if needed
-                        translated_caption = caption
-                        if lang:
-                            translated_caption = await translate_text(caption, lang)
-                            
-                        bale_ids = await forward_to_bale(
-                            "media_group", 
-                            BALE_TOKEN,
-                            caption=translated_caption, 
-                            media_group=media_group,
-                            chat_id=chat_id
-                        )
-                        if bale_ids:
-                            # Store mapping for all messages in the album
-                            for i, msg in enumerate(event.messages):
-                                content_hash = generate_content_hash(msg)
-                                store_message_mapping(
-                                    msg.id,
-                                    chat_id,
-                                    bale_ids,
-                                    is_album=True,
-                                    first_message=(i == 0),
-                                    content_hash=content_hash,
-                                    chat_id=chat.id
-                                )  # Only first message has caption
+                    # Send to Bale chats
+                    if BALE_TOKEN and BALE_CHAT_CONFIGS:
+                        for chat_id, lang in BALE_CHAT_CONFIGS:
+                            # Translate caption if needed
+                            translated_caption = caption
+                            if lang:
+                                translated_caption = await translate_text(caption, lang)
+                                
+                            bale_ids = await forward_to_bale(
+                                "media_group", 
+                                BALE_TOKEN,
+                                caption=translated_caption, 
+                                media_group=media_group,
+                                chat_id=chat_id
+                            )
+                            if bale_ids:
+                                # Store mapping for all messages in the album
+                                for i, msg in enumerate(event.messages):
+                                    content_hash = generate_content_hash(msg)
+                                    store_message_mapping(
+                                        msg.id,
+                                        f"bale_{chat_id}",
+                                        bale_ids,
+                                        is_album=True,
+                                        first_message=(i == 0),
+                                        content_hash=content_hash,
+                                        chat_id=chat.id
+                                    )
+                    
+                    # Send to Eitaa chats
+                    if EITAA_TOKEN and EITAA_CHAT_CONFIGS:
+                        for chat_id, lang in EITAA_CHAT_CONFIGS:
+                            # Translate caption if needed
+                            translated_caption = caption
+                            if lang:
+                                translated_caption = await translate_text(caption, lang)
+                                
+                            eitaa_ids = await forward_to_eitaa(
+                                "media_group", 
+                                EITAA_TOKEN,
+                                caption=translated_caption, 
+                                media_group=media_group,
+                                chat_id=chat_id
+                            )
+                            if eitaa_ids:
+                                # Store mapping for all messages in the album
+                                for i, msg in enumerate(event.messages):
+                                    content_hash = generate_content_hash(msg)
+                                    store_message_mapping(
+                                        msg.id,
+                                        f"eitaa_{chat_id}",
+                                        eitaa_ids,
+                                        is_album=True,
+                                        first_message=(i == 0),
+                                        content_hash=content_hash,
+                                        chat_id=chat.id
+                                    )
             except Exception as e:
                 logger.error(f"❌ Album processing failed: {str(e)}")
             finally:
@@ -301,27 +420,53 @@ async def main():
                                     bale_ids = json.loads(bale_ids_json)
                                     caption = current_msg.text or ""
                                     
-                                    # Find the corresponding chat config
-                                    for chat_config_id, lang in CHAT_CONFIGS:
-                                        if chat_config_id == bale_chat_id:
-                                            # Only edit if this is the first message of an album or a single message
-                                            if not is_album or first_message:
-                                                # Translate if needed
-                                                if lang:
-                                                    caption = await translate_text(caption, lang)
-                                                
-                                                # Determine if text-only message
-                                                is_text = not current_msg.media
-                                                
-                                                await edit_bale_message(
-                                                    bale_ids[0], 
-                                                    caption, 
-                                                    bale_chat_id, 
-                                                    BALE_TOKEN,
-                                                    lang,
-                                                    is_text=is_text
-                                                )
-                                            break
+                                    # Check if this is a Bale or Eitaa chat
+                                    if bale_chat_id.startswith("bale_"):
+                                        actual_chat_id = bale_chat_id[5:]  # Remove "bale_" prefix
+                                        # Find the corresponding Bale chat config
+                                        for chat_config_id, lang in BALE_CHAT_CONFIGS:
+                                            if chat_config_id == actual_chat_id:
+                                                # Only edit if this is the first message of an album or a single message
+                                                if not is_album or first_message:
+                                                    # Translate if needed
+                                                    if lang:
+                                                        caption = await translate_text(caption, lang)
+                                                    
+                                                    # Determine if text-only message
+                                                    is_text = not current_msg.media
+                                                    
+                                                    await edit_bale_message(
+                                                        bale_ids[0], 
+                                                        caption, 
+                                                        actual_chat_id, 
+                                                        BALE_TOKEN,
+                                                        lang,
+                                                        is_text=is_text
+                                                    )
+                                                break
+                                    elif bale_chat_id.startswith("eitaa_"):
+                                        actual_chat_id = bale_chat_id[6:]  # Remove "eitaa_" prefix
+                                        # Find the corresponding Eitaa chat config
+                                        for chat_config_id, lang in EITAA_CHAT_CONFIGS:
+                                            if chat_config_id == actual_chat_id:
+                                                # Only edit if this is the first message of an album or a single message
+                                                if not is_album or first_message:
+                                                    # Translate if needed
+                                                    if lang:
+                                                        caption = await translate_text(caption, lang)
+                                                    
+                                                    # Determine if text-only message
+                                                    is_text = not current_msg.media
+                                                    
+                                                    await edit_eitaa_message(
+                                                        bale_ids[0], 
+                                                        caption, 
+                                                        actual_chat_id, 
+                                                        EITAA_TOKEN,
+                                                        lang,
+                                                        is_text=is_text
+                                                    )
+                                                break
                                     
                                     # Update stored hash
                                     update_message_hash(telegram_id, bale_chat_id, current_hash)
@@ -330,10 +475,16 @@ async def main():
                                 # Message not found - it was deleted
                                 logger.info(f"🗑️ Detected deletion of message {telegram_id}")
                                 
-                                # Delete from Bale
+                                # Delete from appropriate platform
                                 bale_ids = json.loads(bale_ids_json)
-                                for bale_id in bale_ids:
-                                    await delete_bale_message(bale_id, bale_chat_id, BALE_TOKEN)
+                                if bale_chat_id.startswith("bale_"):
+                                    actual_chat_id = bale_chat_id[5:]  # Remove "bale_" prefix
+                                    for bale_id in bale_ids:
+                                        await delete_bale_message(bale_id, actual_chat_id, BALE_TOKEN)
+                                elif bale_chat_id.startswith("eitaa_"):
+                                    actual_chat_id = bale_chat_id[6:]  # Remove "eitaa_" prefix
+                                    for eitaa_id in bale_ids:
+                                        await delete_eitaa_message(eitaa_id, actual_chat_id, EITAA_TOKEN)
                                 
                                 # Remove from database
                                 delete_message_mapping(telegram_id, bale_chat_id)
@@ -476,8 +627,11 @@ async def main():
         for source in sources_list:
             logger.info(f"   - {source}")
         
-        # Log Bale configuration
-        logger.info(f"🤖 Bale forwarding configured to {len(CHAT_CONFIGS)} chats")
+        # Log platform configurations
+        if BALE_CHAT_CONFIGS:
+            logger.info(f"🤖 Bale forwarding configured to {len(BALE_CHAT_CONFIGS)} chats")
+        if EITAA_CHAT_CONFIGS:
+            logger.info(f"📱 Eitaa forwarding configured to {len(EITAA_CHAT_CONFIGS)} chats")
         logger.info(f"🔄 Retry configured: 2 hours max, {MAX_RETRY_DELAY}s max delay")
         logger.info(f"💾 Message mapping database: {get_database_path()}")
         logger.info(f"⏱️ Polling interval: {POLL_INTERVAL} seconds")
