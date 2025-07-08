@@ -3,17 +3,19 @@ import asyncio
 import os
 import sys
 import json
+import datetime
 from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
-import datetime
+
 from bale import forward_to_bale, edit_bale_message, delete_bale_message, translate_text, MAX_RETRY_DELAY
 from database import (
     init_db, generate_content_hash, store_message_mapping, get_message_mapping,
     get_all_message_mappings, delete_message_mapping, delete_all_message_mappings,
     get_recent_message_mappings, update_message_hash, get_database_path
 )
+from media import init_media_dir, clean_old_media, process_single_media, process_media_group, determine_media_type
 
 # Load environment variables
 load_dotenv()
@@ -66,14 +68,9 @@ for chat_id, lang in CHAT_CONFIGS:
     else:
         logger.info(f"   - Chat ID: {chat_id} (No translation)")
 
-# Create media directory if not exists
-MEDIA_DIR = "media"
-os.makedirs(MEDIA_DIR, exist_ok=True)
-logger.info(f"📁 Media storage: {os.path.abspath(MEDIA_DIR)}")
-
-# Initialize database
+# Initialize media directory and database
+init_media_dir()
 init_db()
-
 
 
 async def create_session():
@@ -85,39 +82,6 @@ async def create_session():
         logger.info(f"\033[1;33mSESSION_STRING = '{session_str}'\033[0m")
         logger.info("Add this to your .env file and restart")
         return session_str
-
-
-
-
-
-async def clean_old_media():
-    """Removes media files older than 12 hours from the MEDIA_DIR."""
-    logger.info("🧹 Starting old media cleanup...")
-    now = datetime.datetime.now()
-    twelve_hours_ago = now - datetime.timedelta(hours=12)
-    
-    deleted_count = 0
-    for filename in os.listdir(MEDIA_DIR):
-        file_path = os.path.join(MEDIA_DIR, filename)
-        if os.path.isfile(file_path):
-            try:
-                # Get file modification time
-                mod_timestamp = os.path.getmtime(file_path)
-                mod_datetime = datetime.datetime.fromtimestamp(mod_timestamp)
-                
-                if mod_datetime < twelve_hours_ago:
-                    os.remove(file_path)
-                    logger.info(f"🗑️ Deleted old media file: {filename}")
-                    deleted_count += 1
-            except Exception as e:
-                logger.error(f"❌ Error deleting file {filename}: {e}")
-    
-    logger.info(f"✅ Old media cleanup finished. Deleted {deleted_count} files.")
-
-
-
-
-
 
 
 async def main():
@@ -165,7 +129,6 @@ async def main():
             caption = msg.text or ""
             
             try:
-                
                 # Handle text message
                 if not msg.media:
                     logger.info(f"📝 Text message: {caption}")
@@ -197,78 +160,16 @@ async def main():
                 
                 # Handle media messages
                 else:
-                    # Handle photo (single or album)
-                    if isinstance(msg.media, MessageMediaPhoto):
-                        # Check if part of media group
-                        if msg.grouped_id:
-                            logger.info("⏭️ Part of media group - will process as album")
-                            return
-                        
-                        # Download media once for all chats
-                        media_path = await msg.download_media(
-                            file=MEDIA_DIR,
-                            progress_callback=lambda current, total: logger.info(
-                                f"⬇️ Downloading: {current*100/total:.1f}%"
-                            )
-                        )
-                        logger.info(f"✅ Downloaded photo: \033[1;35m{media_path}\033[0m")
-                        
-                        # Forward to all configured chats
-                        for chat_id, lang in CHAT_CONFIGS:
-                            # Translate if language specified
-                            translated_caption = caption
-                            if lang:
-                                translated_caption = await translate_text(caption, lang)
-                                
-                            bale_ids = await forward_to_bale(
-                                "photo", 
-                                BALE_TOKEN,
-                                caption=translated_caption, 
-                                media_path=media_path,
-                                chat_id=chat_id,
-                                lang=lang
-                            )
-                            if bale_ids:
-                                content_hash = generate_content_hash(msg)
-                                store_message_mapping(
-                                    msg.id, 
-                                    chat_id,
-                                    bale_ids, 
-                                    is_album=False,
-                                    first_message=True,
-                                    content_hash=content_hash,
-                                    chat_id=chat.id
-                                )
+                    # Check if part of media group
+                    if msg.grouped_id:
+                        logger.info("⏭️ Part of media group - will process as album")
+                        return
                     
-                    # Handle documents (could be video, audio, voice, etc.)
-                    elif isinstance(msg.media, MessageMediaDocument):
-                        # Get file attributes
-                        attributes = msg.media.document.attributes
-                        file_name = next((attr.file_name for attr in attributes if hasattr(attr, 'file_name')), None)
-                        
-                        # Download the file once for all chats
-                        media_path = await msg.download_media(
-                            file=MEDIA_DIR,
-                            progress_callback=lambda current, total: logger.info(
-                                f"⬇️ Downloading: {current*100/total:.1f}%"
-                            )
-                        )
-                        
-                        # Determine file type
-                        mime_type = msg.media.document.mime_type
-                        media_type = "document"
-                        
-                        if mime_type.startswith('video'):
-                            media_type = "video"
-                            logger.info(f"🎥 Downloaded video: \033[1;35m{media_path}\033[0m")
-                        elif mime_type.startswith('audio'):
-                            media_type = "audio"
-                            logger.info(f"🎵 Downloaded audio: \033[1;35m{media_path}\033[0m")
-                        elif mime_type == 'audio/ogg' or (file_name and file_name.endswith('.ogg')):
-                            media_type = "voice"
-                            logger.info(f"🎤 Downloaded voice: \033[1;35m{media_path}\033[0m")
-                        else:
-                            logger.warning(f"⚠️ Unsupported document type: {mime_type}")
+                    # Process single media using the media module
+                    media_info = await process_single_media(msg, caption)
+                    if media_info:
+                        media_path = media_info["path"]
+                        media_type = media_info["type"]
                         
                         # Forward to all configured chats
                         for chat_id, lang in CHAT_CONFIGS:
@@ -277,10 +178,10 @@ async def main():
                             if lang:
                                 translated_caption = await translate_text(caption, lang)
                             
-                            # Use specific content type for videos, media_group for others
-                            if media_type == "video":
+                            # Use specific content type for videos and photos, media_group for others
+                            if media_type in ["video", "photo"]:
                                 bale_ids = await forward_to_bale(
-                                    "video", 
+                                    media_type, 
                                     BALE_TOKEN,
                                     caption=translated_caption, 
                                     media_path=media_path,
@@ -307,8 +208,6 @@ async def main():
                                     content_hash=content_hash,
                                     chat_id=chat.id
                                 )
-                    else:
-                        logger.warning(f"⚠️ Unsupported media type: {type(msg.media).__name__}")
             
             except Exception as e:
                 logger.error(f"❌ Processing failed: {str(e)}")
@@ -331,48 +230,8 @@ async def main():
                 # Get caption from first message
                 caption = event.messages[0].text or ""
                 
-                # Download all media in the group once for all chats
-                media_group = []
-                
-                for i, msg in enumerate(event.messages):
-                    if msg.media:
-                        try:
-                            # Download media
-                            media_path = await msg.download_media(
-                                file=MEDIA_DIR,
-                                progress_callback=lambda current, total: logger.info(
-                                    f"⬇️ Downloading album item {i+1}/{len(event.messages)}: {current*100/total:.1f}%"
-                                )
-                            )
-                            logger.info(f"✅ Downloaded album item: \033[1;35m{media_path}\033[0m")
-                            
-                            # Determine media type
-                            media_type = "document"  # default
-                            
-                            if isinstance(msg.media, MessageMediaPhoto):
-                                media_type = "photo"
-                            elif isinstance(msg.media, MessageMediaDocument):
-                                # Get MIME type and file name
-                                mime_type = msg.media.document.mime_type
-                                attributes = msg.media.document.attributes
-                                file_name = next((attr.file_name for attr in attributes if hasattr(attr, 'file_name')), None)
-                                
-                                if mime_type.startswith('video'):
-                                    media_type = "video"
-                                elif mime_type.startswith('audio'):
-                                    media_type = "audio"
-                                elif mime_type == 'audio/ogg' or (file_name and file_name.endswith('.ogg')):
-                                    media_type = "voice"
-                            
-                            media_group.append({
-                                "path": media_path,
-                                "type": media_type
-                            })
-                            
-                        except Exception as e:
-                            logger.error(f"❌ Failed to download album item {i+1}: {str(e)}")
-                    else:
-                        logger.info(f"📝 Album text message: {msg.text}")
+                # Process media group using the media module
+                media_group = await process_media_group(event.messages)
                 
                 # Send to all configured chats
                 if media_group:
@@ -455,13 +314,13 @@ async def main():
                                                 is_text = not current_msg.media
                                                 
                                                 await edit_bale_message(
-                                     bale_ids[0], 
-                                     caption, 
-                                     bale_chat_id, 
-                                     BALE_TOKEN,
-                                     lang,
-                                     is_text=is_text
-                                 )
+                                                    bale_ids[0], 
+                                                    caption, 
+                                                    bale_chat_id, 
+                                                    BALE_TOKEN,
+                                                    lang,
+                                                    is_text=is_text
+                                                )
                                             break
                                     
                                     # Update stored hash
@@ -612,6 +471,7 @@ async def main():
             except Exception as e:
                 logger.error(f"Error initializing chat {source}: {e}")
                 last_message_ids[source] = 0
+        
         logger.info(f"👀 Long polling started for {len(sources_list)} sources:")
         for source in sources_list:
             logger.info(f"   - {source}")
@@ -638,6 +498,7 @@ async def main():
     finally:
         await client.disconnect()
         logger.info("Client disconnected")
+
 
 if __name__ == '__main__':
     if not SESSION_STRING:
