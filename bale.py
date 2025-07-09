@@ -78,7 +78,7 @@ async def send_with_retry(session, url, payload=None, files=None):
     return None
 
 async def forward_to_bale(content_type, bale_token, caption=None, media_path=None, media_group=None, 
-                          chat_id=None, lang=None):
+                          chat_id=None, lang=None, reply_to_message_id=None):
     """Forward content to Bale Messenger for a specific chat"""
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as session:
@@ -92,6 +92,8 @@ async def forward_to_bale(content_type, bale_token, caption=None, media_path=Non
                     "text": caption,
                     "parse_mode": "Markdown"
                 }
+                if reply_to_message_id:
+                    payload["reply_to_message_id"] = reply_to_message_id
                 send_url = get_bale_api_url("sendMessage", bale_token)
                 response = await send_with_retry(session, send_url, payload=payload)
                 if response and response.get("ok"):
@@ -113,6 +115,8 @@ async def forward_to_bale(content_type, bale_token, caption=None, media_path=Non
                 if caption:
                     form_data.add_field('caption', caption)
                     form_data.add_field('parse_mode', 'Markdown')
+                if reply_to_message_id:
+                    form_data.add_field('reply_to_message_id', str(reply_to_message_id))
                 
                 send_url = get_bale_api_url("sendPhoto", bale_token)
                 response = await send_with_retry(session, send_url, files=form_data)
@@ -135,6 +139,8 @@ async def forward_to_bale(content_type, bale_token, caption=None, media_path=Non
                 if caption:
                     form_data.add_field('caption', caption)
                     form_data.add_field('parse_mode', 'Markdown')
+                if reply_to_message_id:
+                    form_data.add_field('reply_to_message_id', str(reply_to_message_id))
                 form_data.add_field('supports_streaming', 'true')
                 
                 send_url = get_bale_api_url("sendVideo", bale_token)
@@ -182,6 +188,8 @@ async def forward_to_bale(content_type, bale_token, caption=None, media_path=Non
                 # Add chat ID and media array
                 form_data.add_field('chat_id', chat_id)
                 form_data.add_field('media', json.dumps(media_data))
+                if reply_to_message_id:
+                    form_data.add_field('reply_to_message_id', str(reply_to_message_id))
                 
                 send_url = get_bale_api_url("sendMediaGroup", bale_token)
                 response = await send_with_retry(session, send_url, files=form_data)

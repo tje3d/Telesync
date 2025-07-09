@@ -132,3 +132,19 @@ def update_message_hash(telegram_id, bale_chat_id, new_hash):
 def get_database_path():
     """Get the absolute path to the database file"""
     return os.path.abspath(DB_FILE)
+
+def get_reply_message_id(telegram_reply_id, bale_chat_id):
+    """Get the Bale message ID for a Telegram message that was replied to"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''SELECT bale_ids FROM messages 
+                 WHERE telegram_id = ? AND bale_chat_id = ?''', 
+              (telegram_reply_id, bale_chat_id))
+    row = c.fetchone()
+    conn.close()
+    
+    if row:
+        bale_ids = json.loads(row[0])
+        # Return the first message ID (for albums, this is the first message)
+        return bale_ids[0] if bale_ids else None
+    return None

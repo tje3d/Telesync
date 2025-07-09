@@ -78,7 +78,7 @@ async def send_with_retry(session, url, payload=None, files=None):
     return None
 
 async def forward_to_eitaa(content_type, eitaa_token, caption=None, media_path=None, media_group=None, 
-                          chat_id=None, lang=None):
+                          chat_id=None, lang=None, reply_to_message_id=None):
     """Forward content to Eitaa Messenger for a specific chat"""
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as session:
@@ -91,6 +91,8 @@ async def forward_to_eitaa(content_type, eitaa_token, caption=None, media_path=N
                     "chat_id": chat_id,
                     "text": caption
                 }
+                if reply_to_message_id:
+                    payload["reply_to_message_id"] = reply_to_message_id
                 send_url = get_eitaa_api_url("sendMessage", eitaa_token)
                 response = await send_with_retry(session, send_url, payload=payload)
                 if response and response.get("ok"):
@@ -119,6 +121,9 @@ async def forward_to_eitaa(content_type, eitaa_token, caption=None, media_path=N
                         # Add caption only to the first file
                         if i == 0 and caption:
                             form_data.add_field('caption', caption)
+                        # Add reply_to_message_id only to the first file
+                        if i == 0 and reply_to_message_id:
+                            form_data.add_field('reply_to_message_id', str(reply_to_message_id))
                         
                         send_url = get_eitaa_api_url("sendFile", eitaa_token)
                         response = await send_with_retry(session, send_url, files=form_data)
@@ -143,6 +148,8 @@ async def forward_to_eitaa(content_type, eitaa_token, caption=None, media_path=N
                     )
                     if caption:
                         form_data.add_field('caption', caption)
+                    if reply_to_message_id:
+                        form_data.add_field('reply_to_message_id', str(reply_to_message_id))
                     
                     send_url = get_eitaa_api_url("sendFile", eitaa_token)
                     response = await send_with_retry(session, send_url, files=form_data)

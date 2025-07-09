@@ -14,7 +14,7 @@ from eitaa import forward_to_eitaa, edit_eitaa_message, delete_eitaa_message, ge
 from database import (
     init_db, generate_content_hash, store_message_mapping, get_message_mapping,
     get_all_message_mappings, delete_message_mapping, delete_all_message_mappings,
-    get_recent_message_mappings, update_message_hash, get_database_path
+    get_recent_message_mappings, update_message_hash, get_database_path, get_reply_message_id
 )
 from media import init_media_dir, clean_old_media, process_single_media, process_media_group, determine_media_type
 
@@ -159,6 +159,11 @@ async def main():
             # Prepare caption (text content)
             caption = msg.text or ""
             
+            # Check if this message is a reply
+            reply_to_message_id = None
+            if msg.reply_to_msg_id:
+                logger.info(f"💬 Message is a reply to Telegram message ID: {msg.reply_to_msg_id}")
+            
             try:
                 # Handle text message
                 if not msg.media:
@@ -167,6 +172,13 @@ async def main():
                     # Forward to all configured Bale chats
                     if BALE_TOKEN and BALE_CHAT_CONFIGS:
                         for chat_id, lang in BALE_CHAT_CONFIGS:
+                            # Check if we need to set reply_to_message_id for Bale
+                            bale_reply_id = None
+                            if msg.reply_to_msg_id:
+                                bale_reply_id = get_reply_message_id(msg.reply_to_msg_id, f"bale_{chat_id}")
+                                if bale_reply_id:
+                                    logger.info(f"🔗 Setting reply to Bale message ID: {bale_reply_id}")
+                            
                             # Translate if language specified
                             translated_caption = caption
                             if lang:
@@ -176,7 +188,8 @@ async def main():
                                 "text", 
                                 BALE_TOKEN,
                                 caption=translated_caption,
-                                chat_id=chat_id
+                                chat_id=chat_id,
+                                reply_to_message_id=bale_reply_id
                             )
                             if bale_ids:
                                 content_hash = generate_content_hash(msg)
@@ -193,6 +206,13 @@ async def main():
                     # Forward to all configured Eitaa chats
                     if EITAA_TOKEN and EITAA_CHAT_CONFIGS:
                         for chat_id, lang in EITAA_CHAT_CONFIGS:
+                            # Check if we need to set reply_to_message_id for Eitaa
+                            eitaa_reply_id = None
+                            if msg.reply_to_msg_id:
+                                eitaa_reply_id = get_reply_message_id(msg.reply_to_msg_id, f"eitaa_{chat_id}")
+                                if eitaa_reply_id:
+                                    logger.info(f"🔗 Setting reply to Eitaa message ID: {eitaa_reply_id}")
+                            
                             # Translate if language specified
                             translated_caption = caption
                             if lang:
@@ -202,7 +222,8 @@ async def main():
                                 "text", 
                                 EITAA_TOKEN,
                                 caption=translated_caption,
-                                chat_id=chat_id
+                                chat_id=chat_id,
+                                reply_to_message_id=eitaa_reply_id
                             )
                             if eitaa_ids:
                                 content_hash = generate_content_hash(msg)
@@ -232,6 +253,13 @@ async def main():
                         # Forward to all configured Bale chats
                         if BALE_TOKEN and BALE_CHAT_CONFIGS:
                             for chat_id, lang in BALE_CHAT_CONFIGS:
+                                # Check if we need to set reply_to_message_id for Bale
+                                bale_reply_id = None
+                                if msg.reply_to_msg_id:
+                                    bale_reply_id = get_reply_message_id(msg.reply_to_msg_id, f"bale_{chat_id}")
+                                    if bale_reply_id:
+                                        logger.info(f"🔗 Setting reply to Bale message ID: {bale_reply_id}")
+                                
                                 # Translate if language specified
                                 translated_caption = caption
                                 if lang:
@@ -245,7 +273,8 @@ async def main():
                                         caption=translated_caption, 
                                         media_path=media_path,
                                         chat_id=chat_id,
-                                        lang=lang
+                                        lang=lang,
+                                        reply_to_message_id=bale_reply_id
                                     )
                                 else:
                                     bale_ids = await forward_to_bale(
@@ -254,7 +283,8 @@ async def main():
                                         caption=translated_caption, 
                                         media_group=[{"path": media_path, "type": media_type}],
                                         chat_id=chat_id,
-                                        lang=lang
+                                        lang=lang,
+                                        reply_to_message_id=bale_reply_id
                                     )
                                 if bale_ids:
                                     content_hash = generate_content_hash(msg)
@@ -271,6 +301,13 @@ async def main():
                         # Forward to all configured Eitaa chats
                         if EITAA_TOKEN and EITAA_CHAT_CONFIGS:
                             for chat_id, lang in EITAA_CHAT_CONFIGS:
+                                # Check if we need to set reply_to_message_id for Eitaa
+                                eitaa_reply_id = None
+                                if msg.reply_to_msg_id:
+                                    eitaa_reply_id = get_reply_message_id(msg.reply_to_msg_id, f"eitaa_{chat_id}")
+                                    if eitaa_reply_id:
+                                        logger.info(f"🔗 Setting reply to Eitaa message ID: {eitaa_reply_id}")
+                                
                                 # Translate if language specified
                                 translated_caption = caption
                                 if lang:
@@ -283,7 +320,8 @@ async def main():
                                     caption=translated_caption, 
                                     media_path=media_path,
                                     chat_id=chat_id,
-                                    lang=lang
+                                    lang=lang,
+                                    reply_to_message_id=eitaa_reply_id
                                 )
                                 if eitaa_ids:
                                     content_hash = generate_content_hash(msg)
@@ -318,6 +356,9 @@ async def main():
                 # Get caption from first message
                 caption = event.messages[0].text or ""
                 
+                # Check if the first message is a reply
+                first_msg = event.messages[0]
+                
                 # Process media group using the media module
                 media_group = await process_media_group(event.messages)
                 
@@ -326,6 +367,13 @@ async def main():
                     # Send to Bale chats
                     if BALE_TOKEN and BALE_CHAT_CONFIGS:
                         for chat_id, lang in BALE_CHAT_CONFIGS:
+                            # Check if we need to set reply_to_message_id for Bale
+                            bale_reply_id = None
+                            if first_msg.reply_to_msg_id:
+                                bale_reply_id = get_reply_message_id(first_msg.reply_to_msg_id, f"bale_{chat_id}")
+                                if bale_reply_id:
+                                    logger.info(f"🔗 Setting album reply to Bale message ID: {bale_reply_id}")
+                            
                             # Translate caption if needed
                             translated_caption = caption
                             if lang:
@@ -336,7 +384,8 @@ async def main():
                                 BALE_TOKEN,
                                 caption=translated_caption, 
                                 media_group=media_group,
-                                chat_id=chat_id
+                                chat_id=chat_id,
+                                reply_to_message_id=bale_reply_id
                             )
                             if bale_ids:
                                 # Store mapping for all messages in the album
@@ -355,6 +404,13 @@ async def main():
                     # Send to Eitaa chats
                     if EITAA_TOKEN and EITAA_CHAT_CONFIGS:
                         for chat_id, lang in EITAA_CHAT_CONFIGS:
+                            # Check if we need to set reply_to_message_id for Eitaa
+                            eitaa_reply_id = None
+                            if first_msg.reply_to_msg_id:
+                                eitaa_reply_id = get_reply_message_id(first_msg.reply_to_msg_id, f"eitaa_{chat_id}")
+                                if eitaa_reply_id:
+                                    logger.info(f"🔗 Setting album reply to Eitaa message ID: {eitaa_reply_id}")
+                            
                             # Translate caption if needed
                             translated_caption = caption
                             if lang:
@@ -365,7 +421,8 @@ async def main():
                                 EITAA_TOKEN,
                                 caption=translated_caption, 
                                 media_group=media_group,
-                                chat_id=chat_id
+                                chat_id=chat_id,
+                                reply_to_message_id=eitaa_reply_id
                             )
                             if eitaa_ids:
                                 # Store mapping for all messages in the album
