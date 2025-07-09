@@ -90,7 +90,7 @@ async def forward_to_bale(content_type, bale_token, caption=None, media_path=Non
                 payload = {
                     "chat_id": chat_id,
                     "text": caption,
-                    "parse_mode": "HTML"
+                    "parse_mode": "Markdown"
                 }
                 send_url = get_bale_api_url("sendMessage", bale_token)
                 response = await send_with_retry(session, send_url, payload=payload)
@@ -112,7 +112,7 @@ async def forward_to_bale(content_type, bale_token, caption=None, media_path=Non
                 )
                 if caption:
                     form_data.add_field('caption', caption)
-                    form_data.add_field('parse_mode', 'HTML')
+                    form_data.add_field('parse_mode', 'Markdown')
                 
                 send_url = get_bale_api_url("sendPhoto", bale_token)
                 response = await send_with_retry(session, send_url, files=form_data)
@@ -134,7 +134,7 @@ async def forward_to_bale(content_type, bale_token, caption=None, media_path=Non
                 )
                 if caption:
                     form_data.add_field('caption', caption)
-                    form_data.add_field('parse_mode', 'HTML')
+                    form_data.add_field('parse_mode', 'Markdown')
                 form_data.add_field('supports_streaming', 'true')
                 
                 send_url = get_bale_api_url("sendVideo", bale_token)
@@ -166,7 +166,7 @@ async def forward_to_bale(content_type, bale_token, caption=None, media_path=Non
                     media_dict = {
                         "type": media_type,
                         "media": f"attach://media_{i}",
-                        "parse_mode": "HTML"
+                        "parse_mode": "Markdown"
                     }
                     
                     # Add caption to first item
@@ -217,7 +217,7 @@ async def edit_bale_message(bale_id, new_content, chat_id, bale_token, lang=None
                 "chat_id": chat_id,
                 "message_id": bale_id,
                 payload_key: new_content,
-                "parse_mode": "HTML"
+                "parse_mode": "Markdown"
             }
             response = await send_with_retry(session, url, payload=payload)
             if response and response.get("ok"):
