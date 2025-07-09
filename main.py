@@ -169,7 +169,10 @@ async def main():
                 if not msg.media:
                     logger.info(f"📝 Text message: {caption}")
                     
-                    # Forward to all configured Bale chats
+                    # Create tasks for concurrent forwarding
+                    forwarding_tasks = []
+                    
+                    # Prepare Bale forwarding tasks
                     if BALE_TOKEN and BALE_CHAT_CONFIGS:
                         for chat_id, lang in BALE_CHAT_CONFIGS:
                             # Check if we need to set reply_to_message_id for Bale
@@ -183,27 +186,20 @@ async def main():
                             translated_caption = caption
                             if lang:
                                 translated_caption = await translate_text(caption, lang)
-                                
-                            bale_ids = await forward_to_bale(
-                                "text", 
-                                BALE_TOKEN,
-                                caption=translated_caption,
-                                chat_id=chat_id,
-                                reply_to_message_id=bale_reply_id
-                            )
-                            if bale_ids:
-                                content_hash = generate_content_hash(msg)
-                                store_message_mapping(
-                                    msg.id, 
-                                    f"bale_{chat_id}",
-                                    bale_ids, 
-                                    is_album=False,
-                                    first_message=True,
-                                    content_hash=content_hash,
-                                    chat_id=chat.id
+                            
+                            # Create task for Bale forwarding
+                            task = asyncio.create_task(
+                                forward_to_bale(
+                                    "text", 
+                                    BALE_TOKEN,
+                                    caption=translated_caption,
+                                    chat_id=chat_id,
+                                    reply_to_message_id=bale_reply_id
                                 )
+                            )
+                            forwarding_tasks.append(('bale', chat_id, task))
                     
-                    # Forward to all configured Eitaa chats
+                    # Prepare Eitaa forwarding tasks
                     if EITAA_TOKEN and EITAA_CHAT_CONFIGS:
                         for chat_id, lang in EITAA_CHAT_CONFIGS:
                             # Check if we need to set reply_to_message_id for Eitaa
@@ -217,20 +213,36 @@ async def main():
                             translated_caption = caption
                             if lang:
                                 translated_caption = await translate_text(caption, lang)
-                                
-                            eitaa_ids = await forward_to_eitaa(
-                                "text", 
-                                EITAA_TOKEN,
-                                caption=translated_caption,
-                                chat_id=chat_id,
-                                reply_to_message_id=eitaa_reply_id
+                            
+                            # Create task for Eitaa forwarding
+                            task = asyncio.create_task(
+                                forward_to_eitaa(
+                                    "text", 
+                                    EITAA_TOKEN,
+                                    caption=translated_caption,
+                                    chat_id=chat_id,
+                                    reply_to_message_id=eitaa_reply_id
+                                )
                             )
-                            if eitaa_ids:
+                            forwarding_tasks.append(('eitaa', chat_id, task))
+                    
+                    # Execute all forwarding tasks concurrently
+                    if forwarding_tasks:
+                        results = await asyncio.gather(*[task for _, _, task in forwarding_tasks], return_exceptions=True)
+                        
+                        # Process results and store mappings
+                        for i, (platform, chat_id, _) in enumerate(forwarding_tasks):
+                            result = results[i]
+                            if isinstance(result, Exception):
+                                logger.error(f"❌ {platform.capitalize()} forwarding failed for chat {chat_id}: {result}")
+                                continue
+                                
+                            if result:  # result contains the message IDs
                                 content_hash = generate_content_hash(msg)
                                 store_message_mapping(
                                     msg.id, 
-                                    f"eitaa_{chat_id}",
-                                    eitaa_ids, 
+                                    f"{platform}_{chat_id}",
+                                    result, 
                                     is_album=False,
                                     first_message=True,
                                     content_hash=content_hash,
@@ -250,7 +262,10 @@ async def main():
                         media_path = media_info["path"]
                         media_type = media_info["type"]
                         
-                        # Forward to all configured Bale chats
+                        # Create tasks for concurrent media forwarding
+                        media_forwarding_tasks = []
+                        
+                        # Prepare Bale media forwarding tasks
                         if BALE_TOKEN and BALE_CHAT_CONFIGS:
                             for chat_id, lang in BALE_CHAT_CONFIGS:
                                 # Check if we need to set reply_to_message_id for Bale
@@ -267,38 +282,32 @@ async def main():
                                 
                                 # Use specific content type for videos and photos, media_group for others
                                 if media_type in ["video", "photo"]:
-                                    bale_ids = await forward_to_bale(
-                                        media_type, 
-                                        BALE_TOKEN,
-                                        caption=translated_caption, 
-                                        media_path=media_path,
-                                        chat_id=chat_id,
-                                        lang=lang,
-                                        reply_to_message_id=bale_reply_id
+                                    task = asyncio.create_task(
+                                        forward_to_bale(
+                                            media_type, 
+                                            BALE_TOKEN,
+                                            caption=translated_caption, 
+                                            media_path=media_path,
+                                            chat_id=chat_id,
+                                            lang=lang,
+                                            reply_to_message_id=bale_reply_id
+                                        )
                                     )
                                 else:
-                                    bale_ids = await forward_to_bale(
-                                        "media_group", 
-                                        BALE_TOKEN,
-                                        caption=translated_caption, 
-                                        media_group=[{"path": media_path, "type": media_type}],
-                                        chat_id=chat_id,
-                                        lang=lang,
-                                        reply_to_message_id=bale_reply_id
+                                    task = asyncio.create_task(
+                                        forward_to_bale(
+                                            "media_group", 
+                                            BALE_TOKEN,
+                                            caption=translated_caption, 
+                                            media_group=[{"path": media_path, "type": media_type}],
+                                            chat_id=chat_id,
+                                            lang=lang,
+                                            reply_to_message_id=bale_reply_id
+                                        )
                                     )
-                                if bale_ids:
-                                    content_hash = generate_content_hash(msg)
-                                    store_message_mapping(
-                                        msg.id, 
-                                        f"bale_{chat_id}",
-                                        bale_ids, 
-                                        is_album=False,
-                                        first_message=True,
-                                        content_hash=content_hash,
-                                        chat_id=chat.id
-                                    )
+                                media_forwarding_tasks.append(('bale', chat_id, task))
                         
-                        # Forward to all configured Eitaa chats
+                        # Prepare Eitaa media forwarding tasks
                         if EITAA_TOKEN and EITAA_CHAT_CONFIGS:
                             for chat_id, lang in EITAA_CHAT_CONFIGS:
                                 # Check if we need to set reply_to_message_id for Eitaa
@@ -314,21 +323,36 @@ async def main():
                                     translated_caption = await translate_text(caption, lang)
                                 
                                 # Eitaa uses sendFile for all media types
-                                eitaa_ids = await forward_to_eitaa(
-                                    media_type, 
-                                    EITAA_TOKEN,
-                                    caption=translated_caption, 
-                                    media_path=media_path,
-                                    chat_id=chat_id,
-                                    lang=lang,
-                                    reply_to_message_id=eitaa_reply_id
+                                task = asyncio.create_task(
+                                    forward_to_eitaa(
+                                        media_type, 
+                                        EITAA_TOKEN,
+                                        caption=translated_caption, 
+                                        media_path=media_path,
+                                        chat_id=chat_id,
+                                        lang=lang,
+                                        reply_to_message_id=eitaa_reply_id
+                                    )
                                 )
-                                if eitaa_ids:
+                                media_forwarding_tasks.append(('eitaa', chat_id, task))
+                        
+                        # Execute all media forwarding tasks concurrently
+                        if media_forwarding_tasks:
+                            results = await asyncio.gather(*[task for _, _, task in media_forwarding_tasks], return_exceptions=True)
+                            
+                            # Process results and store mappings
+                            for i, (platform, chat_id, _) in enumerate(media_forwarding_tasks):
+                                result = results[i]
+                                if isinstance(result, Exception):
+                                    logger.error(f"❌ {platform.capitalize()} media forwarding failed for chat {chat_id}: {result}")
+                                    continue
+                                    
+                                if result:  # result contains the message IDs
                                     content_hash = generate_content_hash(msg)
                                     store_message_mapping(
                                         msg.id, 
-                                        f"eitaa_{chat_id}",
-                                        eitaa_ids, 
+                                        f"{platform}_{chat_id}",
+                                        result, 
                                         is_album=False,
                                         first_message=True,
                                         content_hash=content_hash,
@@ -364,7 +388,10 @@ async def main():
                 
                 # Send to all configured chats
                 if media_group:
-                    # Send to Bale chats
+                    # Create tasks for concurrent album forwarding
+                    album_forwarding_tasks = []
+                    
+                    # Prepare Bale album forwarding tasks
                     if BALE_TOKEN and BALE_CHAT_CONFIGS:
                         for chat_id, lang in BALE_CHAT_CONFIGS:
                             # Check if we need to set reply_to_message_id for Bale
@@ -378,30 +405,21 @@ async def main():
                             translated_caption = caption
                             if lang:
                                 translated_caption = await translate_text(caption, lang)
-                                
-                            bale_ids = await forward_to_bale(
-                                "media_group", 
-                                BALE_TOKEN,
-                                caption=translated_caption, 
-                                media_group=media_group,
-                                chat_id=chat_id,
-                                reply_to_message_id=bale_reply_id
+                            
+                            # Create task for Bale album forwarding
+                            task = asyncio.create_task(
+                                forward_to_bale(
+                                    "media_group", 
+                                    BALE_TOKEN,
+                                    caption=translated_caption, 
+                                    media_group=media_group,
+                                    chat_id=chat_id,
+                                    reply_to_message_id=bale_reply_id
+                                )
                             )
-                            if bale_ids:
-                                # Store mapping for all messages in the album
-                                for i, msg in enumerate(event.messages):
-                                    content_hash = generate_content_hash(msg)
-                                    store_message_mapping(
-                                        msg.id,
-                                        f"bale_{chat_id}",
-                                        bale_ids,
-                                        is_album=True,
-                                        first_message=(i == 0),
-                                        content_hash=content_hash,
-                                        chat_id=chat.id
-                                    )
+                            album_forwarding_tasks.append(('bale', chat_id, task))
                     
-                    # Send to Eitaa chats
+                    # Prepare Eitaa album forwarding tasks
                     if EITAA_TOKEN and EITAA_CHAT_CONFIGS:
                         for chat_id, lang in EITAA_CHAT_CONFIGS:
                             # Check if we need to set reply_to_message_id for Eitaa
@@ -415,25 +433,41 @@ async def main():
                             translated_caption = caption
                             if lang:
                                 translated_caption = await translate_text(caption, lang)
-                                
-                            eitaa_ids = await forward_to_eitaa(
-                                "media_group", 
-                                EITAA_TOKEN,
-                                caption=translated_caption, 
-                                media_group=media_group,
-                                chat_id=chat_id,
-                                reply_to_message_id=eitaa_reply_id
+                            
+                            # Create task for Eitaa album forwarding
+                            task = asyncio.create_task(
+                                forward_to_eitaa(
+                                    "media_group", 
+                                    EITAA_TOKEN,
+                                    caption=translated_caption, 
+                                    media_group=media_group,
+                                    chat_id=chat_id,
+                                    reply_to_message_id=eitaa_reply_id
+                                )
                             )
-                            if eitaa_ids:
+                            album_forwarding_tasks.append(('eitaa', chat_id, task))
+                    
+                    # Execute all album forwarding tasks concurrently
+                    if album_forwarding_tasks:
+                        results = await asyncio.gather(*[task for _, _, task in album_forwarding_tasks], return_exceptions=True)
+                        
+                        # Process results and store mappings
+                        for i, (platform, chat_id, _) in enumerate(album_forwarding_tasks):
+                            result = results[i]
+                            if isinstance(result, Exception):
+                                logger.error(f"❌ {platform.capitalize()} album forwarding failed for chat {chat_id}: {result}")
+                                continue
+                                
+                            if result:  # result contains the message IDs
                                 # Store mapping for all messages in the album
-                                for i, msg in enumerate(event.messages):
+                                for j, msg in enumerate(event.messages):
                                     content_hash = generate_content_hash(msg)
                                     store_message_mapping(
                                         msg.id,
-                                        f"eitaa_{chat_id}",
-                                        eitaa_ids,
+                                        f"{platform}_{chat_id}",
+                                        result,
                                         is_album=True,
-                                        first_message=(i == 0),
+                                        first_message=(j == 0),
                                         content_hash=content_hash,
                                         chat_id=chat.id
                                     )
