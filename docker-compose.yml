@@ -1,8 +1,8 @@
-version: '3.8'
+version: "3.8"
 
 services:
   telegram-forwarder:
-    build: 
+    build:
       context: .
       dockerfile: Dockerfile
     container_name: telegram-forwarder
@@ -12,4 +12,6 @@ services:
       - ./:/app
     environment:
       - TZ=Asia/Tehran
+    stdin_open: true
+    tty: true
     command: python -u main.py
